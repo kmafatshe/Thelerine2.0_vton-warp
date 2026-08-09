@@ -187,6 +187,53 @@ greyscale PNGs with scaled class ids. Colourised RGB parse visualisations are
 rejected with an explicit error rather than silently misread — export raw label
 indices.
 
+### Label conventions — get this right first
+
+A parse map is only integers; the taxonomy that produced them decides what those
+integers mean, and the two common ones disagree precisely where it hurts:
+
+| id | CIHP / LIP (20 classes) | ATR (18 classes) |
+|---|---|---|
+| 4 | sunglasses | **upper clothes** |
+| 5 | **upper clothes** | skirt |
+| 6 | **dress** | pants |
+| 7 | **coat** | dress |
+| 9 | **pants** | left shoe |
+| 11 | scarf | **face** |
+| 12 | **skirt** | left leg |
+
+Assume CIHP on ATR maps and the model erases the person's face and trousers
+instead of their shirt — silently, with no error. Identify yours:
+
+```bash
+python scripts/check_dataset.py --root /path/to/dataset --diagnose-labels
+```
+
+It scores each convention on colour agreement between garment and parse region,
+plus the physical priors that heads are at the top of an image and shoes at the
+bottom. Put the winner in `data.label_scheme` in **both** configs.
+
+### Mixed garment types
+
+`data.garment_type: auto` (the default) picks the target region per sample, from
+the garment filename (`0007_garment_dress.jpg`) and from colour agreement with
+each clothing region. A dataset containing dresses, tops, jeans and skirts needs
+this — a single global `garment_type` would train the model to warp trousers
+onto a T-shirt's silhouette. Force one region for the whole dataset with
+`upper`, `lower` or `full`.
+
+### Garment framing
+
+`data.canonicalise_garment: true` crops each product shot to its mask and
+rescales it so every garment enters the network at roughly the same size.
+Without it, wildly inconsistent framing (a thumbnail on a large canvas next to a
+full-bleed photo) makes the warper learn a large scale change on top of the
+body-shape deformation, from very few examples.
+
+The mask for the flat garment is taken from `segmentation/` when that looks
+right, otherwise it is segmented from the product shot's background — measured
+from the image border, so black, white or any other uniform backdrop works.
+
 **`segmentation/` is ambiguous, so check what yours actually contains.** The code
 uses it as the mask of the *flat garment product shot*. If yours instead holds
 the garment mask **on the person**, or a full-body silhouette, set
@@ -322,6 +369,9 @@ Stage 1 is comfortable either way; stage 2 is the expensive half. Options:
 
 | symptom | cause | fix |
 |---|---|---|
+| `warped` column is a black/white blob | garment mask covers the background | check the `garment mask` column; supply explicit masks or use plainer product shots |
+| `target garment` shows different clothing to `garment` | wrong label scheme, or wrong per-sample region | `--diagnose-labels`; confirm `data.garment_type: auto` |
+| `agnostic` still shows the original garment | wrong label scheme, or too little dilation | `--diagnose-labels`; raise `data.erase_dilate` |
 | Garment lands in the wrong place | stage 1 undertrained | more steps; raise `loss.shape` |
 | Garment torn or folded onto itself | flow unconstrained | raise `loss.tv`, `loss.smooth`, `loss.grid` |
 | Garment looks like a rigid decal | residual flow too tight | raise `model.max_displacement`, lower `loss.tv` |

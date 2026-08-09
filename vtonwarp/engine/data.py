@@ -59,9 +59,12 @@ def build_dataloaders(config):
         root=root,
         height=config.data.height,
         width=config.data.width,
-        garment_type=config.data.get("garment_type", "upper"),
+        garment_type=config.data.get("garment_type", "auto"),
+        label_scheme=config.data.get("label_scheme", "cihp"),
         dilate=config.data.get("erase_dilate", 5),
         segmentation_role=config.data.get("segmentation_role", "auto"),
+        canonicalise=config.data.get("canonicalise_garment", True),
+        garment_fill=config.data.get("garment_fill", 0.8),
     )
 
     augment = PairedAugment(**dict(config.get("augment", {})))

@@ -31,7 +31,12 @@ data:
 
   height: 256
   width: 192
-  garment_type: upper
+  # Must match the values used for stage 1, or the two stages disagree about
+  # what the agnostic input means. See configs/warp.yaml for the explanations.
+  label_scheme: cihp
+  garment_type: auto
+  canonicalise_garment: true
+  garment_fill: 0.8
   erase_dilate: 5
   val_fraction: 0.15
 

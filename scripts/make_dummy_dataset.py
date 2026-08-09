@@ -95,15 +95,27 @@ def make_sample(index: int, rng):
     parse[torso_y: torso_y + torso_h, torso_x: torso_x + torso_w] = 5
 
     # ---- flat garment ----------------------------------------------------
-    garment = Image.new("RGB", (W, H), (255, 255, 255))
-    flat_w, flat_h = int(torso_w * 1.25), int(torso_h * 1.25)
+    # Half the samples are cutouts on black at a small scale, half are on white
+    # and fill the frame -- the two framings a hand-built dataset ends up with.
+    on_black = index % 2 == 0
+    background = (0, 0, 0) if on_black else (255, 255, 255)
+    garment = Image.new("RGB", (W, H), background)
+
+    scale = 0.45 if on_black else 1.25
+    lower = index % 3 == 0  # every third sample swaps trousers, not a top
+    source = (stripes((44, 70), pants, rng) if lower
+              else stripes((torso_w, torso_h), colour, rng))
+
+    flat_w = max(8, int(source.width * scale))
+    flat_h = max(8, int(source.height * scale))
+    source = source.resize((flat_w, flat_h))
     flat_x, flat_y = W // 2 - flat_w // 2, H // 2 - flat_h // 2
-    garment.paste(stripes((flat_w, flat_h), colour, rng), (flat_x, flat_y))
+    garment.paste(source, (flat_x, flat_y))
 
     garment_mask = np.zeros((H, W), dtype=np.uint8)
     garment_mask[flat_y: flat_y + flat_h, flat_x: flat_x + flat_w] = 255
 
-    return person, garment, parse, garment_mask
+    return person, garment, parse, garment_mask, ("pants" if lower else "top")
 
 
 def main():
@@ -119,13 +131,13 @@ def main():
     for index in range(args.count):
         subject = "personA" if index % 2 == 0 else "personB"
         name = f"{index:04d}"
-        person, garment, parse, mask = make_sample(index, rng)
+        person, garment, parse, mask, kind = make_sample(index, rng)
 
         for folder in ("person", "garments", "cihp", "segmentation"):
             (root / folder / subject).mkdir(parents=True, exist_ok=True)
 
         person.save(root / "person" / subject / f"{name}_person.jpg", quality=95)
-        garment.save(root / "garments" / subject / f"{name}_garment.jpg", quality=95)
+        garment.save(root / "garments" / subject / f"{name}_garment_{kind}.jpg", quality=95)
         np.save(root / "cihp" / subject / f"{name}_cihp.npy", parse)
         Image.fromarray(mask).save(root / "segmentation" / subject / f"{name}_seg.png")
 

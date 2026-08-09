@@ -27,7 +27,20 @@ data:
 
   height: 256
   width: 192
-  garment_type: upper            # upper | lower | full
+  # Which parsing convention your maps follow: cihp (= LIP, 20 classes) or
+  # atr (18 classes). WRONG VALUE = silently erasing the wrong body parts.
+  # Identify yours with: scripts/check_dataset.py --diagnose-labels
+  label_scheme: cihp
+
+  # auto = pick the garment region per sample from the filename and colour.
+  # Required for a dataset mixing dresses, tops and trousers. Force one region
+  # for every sample with upper | lower | full.
+  garment_type: auto
+
+  # Crop each garment to its mask and rescale, so framing is consistent.
+  canonicalise_garment: true
+  garment_fill: 0.8
+
   erase_dilate: 5                # px of slack around the erased garment region
   val_fraction: 0.15
 

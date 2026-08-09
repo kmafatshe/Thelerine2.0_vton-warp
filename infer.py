@@ -28,8 +28,20 @@ from pathlib import Path
 
 import torch
 
-from vtonwarp.data.agnostic import CONDITION_CHANNELS, build_agnostic, stack_condition
-from vtonwarp.data.io import garment_mask_from_rgb, load_image, load_label_map, load_mask
+from vtonwarp.data.agnostic import (
+    CONDITION_CHANNELS,
+    build_agnostic,
+    select_garment_labels,
+    stack_condition,
+)
+from vtonwarp.data.io import (
+    canonicalise_garment,
+    garment_mask_from_rgb,
+    load_image,
+    load_label_map,
+    load_mask,
+)
+from vtonwarp.data.labels import get_scheme, role_from_filename
 from vtonwarp.data.manifest import read_manifest
 from vtonwarp.engine.checkpoint import load_checkpoint
 from vtonwarp.engine.visualize import contact_sheet, to_uint8
@@ -64,8 +76,11 @@ class TryOnPipeline:
         self.device = device
         self.height = config.data.height
         self.width = config.data.width
-        self.garment_type = config.data.get("garment_type", "upper")
+        self.garment_type = config.data.get("garment_type", "auto")
+        self.scheme = get_scheme(config.data.get("label_scheme", "cihp"))
         self.dilate = config.data.get("erase_dilate", 5)
+        self.canonicalise = config.data.get("canonicalise_garment", True)
+        self.garment_fill = config.data.get("garment_fill", 0.8)
 
         warp_config = Config(load_checkpoint(config.train.warp_checkpoint,
                                              map_location="cpu")["config"])
@@ -95,10 +110,29 @@ class TryOnPipeline:
 
     # ------------------------------------------------------------------
 
-    def condition_from(self, person_path, parse_path) -> tuple[torch.Tensor, torch.Tensor]:
+    def condition_from(self, person_path, parse_path, garment=None, mask=None,
+                       hint=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build the agnostic condition for a person.
+
+        The garment is optional but recommended: with `garment_type: auto` it is
+        what decides *which* region of the person to erase. Omitting it on a
+        mixed dataset means erasing the wrong garment — you would be putting a
+        dress onto a body whose trousers were removed.
+        """
         person = load_image(Path(person_path), self.height, self.width)
-        parse = load_label_map(Path(parse_path), self.height, self.width)
-        sample = build_agnostic(person, parse, self.garment_type, self.dilate)
+        parse = load_label_map(Path(parse_path), self.height, self.width,
+                               self.scheme.num_classes)
+
+        if self.garment_type == "auto" and garment is not None:
+            labels = select_garment_labels(
+                self.scheme, parse, person, garment[0], mask[0], hint=hint,
+            )
+        elif self.garment_type == "auto":
+            labels = self.scheme.garment_labels("upper")
+        else:
+            labels = self.scheme.garment_labels(self.garment_type)
+
+        sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
         return stack_condition(sample)[None], sample["agnostic"][None]
 
     def garment_from(self, garment_path, mask_path=None):
@@ -107,6 +141,9 @@ class TryOnPipeline:
             mask = load_mask(Path(mask_path), self.height, self.width)
         else:
             mask = garment_mask_from_rgb(garment)
+        if self.canonicalise:
+            garment, mask = canonicalise_garment(garment, mask,
+                                                 fill=self.garment_fill)
         return garment[None], mask[None]
 
     @torch.no_grad()
@@ -140,8 +177,11 @@ def main():
     if not (args.person and args.parse and args.garment):
         raise SystemExit("--person, --parse and --garment are required without --grid")
 
-    condition, agnostic = pipeline.condition_from(args.person, args.parse)
     garment, mask = pipeline.garment_from(args.garment, args.garment_mask)
+    condition, agnostic = pipeline.condition_from(
+        args.person, args.parse, garment, mask,
+        hint=role_from_filename(Path(args.garment).stem),
+    )
     result = pipeline(condition, garment, mask)
 
     save_image(result["output"][0], args.out)
@@ -178,7 +218,10 @@ def run_grid(pipeline: TryOnPipeline, args) -> None:
             if parse_path is None:
                 print(f"[infer] skipping {person_record.key}: no parse map")
                 continue
-            condition, _ = pipeline.condition_from(person_paths["person"], parse_path)
+            condition, _ = pipeline.condition_from(
+                person_paths["person"], parse_path, garment, mask,
+                hint=role_from_filename(Path(paths["garment"]).stem),
+            )
             result = pipeline(condition, garment, mask)
             column.append(result["output"][0].cpu())
         columns[f"garment {garment_record.key}"] = torch.stack(column)
