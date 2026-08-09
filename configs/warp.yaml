@@ -16,10 +16,12 @@ data:
   root: /path/to/your/dataset    # <-- the folder containing person/ garments/ cihp/ segmentation/
   manifest: null                 # defaults to <root>/manifest.json
   rebuild_manifest: false
-  person_dir: person
-  garment_dir: garments
-  cihp_dir: cihp
-  segmentation_dir: segmentation
+  # null = auto-detect. `cond/`, `seg/`, `parse/`, `cihp_maps/` and
+  # similar are all resolved automatically; name one here to force it.
+  person_dir: null
+  garment_dir: null
+  cihp_dir: null
+  segmentation_dir: null
   # auto | garment_mask | person_mask | parse | ignore
   segmentation_role: auto
 

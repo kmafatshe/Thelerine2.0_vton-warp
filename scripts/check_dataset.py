@@ -8,6 +8,7 @@ Small-dataset projects fail far more often from a silently mismatched file than
 from a bad architecture — one wrong parse map is 1% of your data. This script
 reports:
 
+  * which folder it picked for each of the four roles, and what is inside them
   * how many person images were matched to a garment, and which were not
   * what the parse maps actually contain (which CIHP classes are present)
   * whether the garment region is a plausible fraction of the image
@@ -15,8 +16,8 @@ reports:
   * a contact sheet of the derived agnostic representation, so you can *see*
     that the garment really has been erased
 
-If the "garment coverage" number is near zero your parse maps are using a
-different label convention; edit UPPER_GARMENT in vtonwarp/data/labels.py.
+Folder names are auto-detected (`cond/` resolves to the cihp role, `seg/` to
+segmentation, and so on). Override any of them explicitly with --cihp-dir etc.
 """
 
 from __future__ import annotations
@@ -28,20 +29,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import argparse
 from collections import Counter
-from pathlib import Path
 
 import torch
 
 from vtonwarp.data.agnostic import build_agnostic
 from vtonwarp.data.io import garment_mask_from_rgb, load_image, load_label_map, load_mask
 from vtonwarp.data.labels import CIHP_LABELS, GARMENT_SETS
-from vtonwarp.data.manifest import build_manifest
+from vtonwarp.data.manifest import build_manifest, describe_layout, resolve_layout
 from vtonwarp.engine.visualize import contact_sheet
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
+    parser.add_argument("--person-dir", default=None)
+    parser.add_argument("--garment-dir", default=None)
+    parser.add_argument("--cihp-dir", default=None)
+    parser.add_argument("--segmentation-dir", default=None)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=192)
     parser.add_argument("--garment-type", default="upper")
@@ -55,30 +59,70 @@ def main():
     root = Path(args.root).resolve()
     print(f"[check] root: {root}")
 
-    records = build_manifest(root)
-    print(f"[check] matched {len(records)} triplets")
+    overrides = {
+        "person_dir": args.person_dir,
+        "garment_dir": args.garment_dir,
+        "cihp_dir": args.cihp_dir,
+        "segmentation_dir": args.segmentation_dir,
+    }
+    layout = resolve_layout(root, overrides)
+    print("[check] folder roles:")
+    for role, name in layout.items():
+        print(f"          {role:<18} -> {name or '(not found)'}")
+
+    records = build_manifest(root, **layout)
+    print(f"\n[check] matched {len(records)} triplets")
     if not records:
-        raise SystemExit("nothing matched — check folder names and file stems")
+        print("\n" + describe_layout(root))
+        raise SystemExit(
+            "\nNothing matched. Person and garment files pair up by their "
+            "normalised key (shown above) — if the keys differ between folders, "
+            "rename the files or extend ROLE_TOKENS in vtonwarp/data/manifest.py."
+        )
 
     by_subject = Counter(r.subject or "(flat)" for r in records)
+    n_cihp = sum(r.cihp is not None for r in records)
+    n_seg = sum(r.segmentation is not None for r in records)
     print(f"[check] subjects: {dict(by_subject)}")
-    print(f"[check] with cihp: {sum(r.cihp is not None for r in records)}")
-    print(f"[check] with segmentation: "
-          f"{sum(r.segmentation is not None for r in records)}")
+    print(f"[check] with cihp: {n_cihp}")
+    print(f"[check] with segmentation: {n_seg}")
+
+    # A parse map is mandatory: the whole agnostic representation is derived
+    # from it. Fail here with something actionable rather than deep inside a
+    # loader with a None path.
+    if n_cihp == 0 and n_seg == 0:
+        print("\n" + describe_layout(root))
+        raise SystemExit(
+            "\nNo parse maps were matched to any person, so the clothing-agnostic\n"
+            "input cannot be built. Two things to check in the report above:\n"
+            "  1. Is a parse folder present at all? If it is named something\n"
+            "     unusual, pass it explicitly:  --cihp-dir <folder>\n"
+            "  2. Do its files reduce to the same key as the person images? The\n"
+            "     'key' shown for each sample is what matching compares. If the\n"
+            "     keys differ, rename the files so the ids line up.\n"
+            "Without parse maps you would need a human-parsing model (e.g. CIHP\n"
+            "PGN or SCHP) to generate them before training."
+        )
 
     label_counter = Counter()
     coverage = []
     seg_means = []
+    skipped = 0
     columns = {k: [] for k in
                ("person", "parse", "agnostic", "head", "shape", "garment",
                 "garment mask", "target garment")}
 
-    for record in records[: args.samples]:
+    for record in records:
+        if len(columns["person"]) >= args.samples:
+            break
         paths = record.resolve(root)
+        source = paths["cihp"] or paths["segmentation"]
+        if source is None:
+            skipped += 1
+            continue
+
         person = load_image(paths["person"], args.height, args.width)
         garment = load_image(paths["garment"], args.height, args.width)
-
-        source = paths["cihp"] or paths["segmentation"]
         parse = load_label_map(source, args.height, args.width)
         label_counter.update(parse.unique().tolist())
 
@@ -97,6 +141,9 @@ def main():
         columns["garment"].append(garment)
         columns["garment mask"].append(garment_mask_from_rgb(garment))
         columns["target garment"].append(sample["target_garment"])
+
+    if skipped:
+        print(f"[check] skipped {skipped} sample(s) with no parse map")
 
     print("\n[check] CIHP classes present in sampled parse maps:")
     for label_id, count in sorted(label_counter.items()):

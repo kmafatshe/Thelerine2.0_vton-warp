@@ -49,6 +49,81 @@ ROLE_TOKENS = (
 
 _SPLIT = re.compile(r"[^a-z0-9]+")
 
+# Folder names, in preference order, for each of the four roles. Hand-built
+# datasets rename these constantly, so we resolve them rather than demand them.
+ROLE_FOLDERS = {
+    "person_dir": ("person", "persons", "people", "model", "models", "target"),
+    "garment_dir": ("garments", "garment", "cloth", "cloths", "clothes",
+                    "clothing", "product"),
+    "cihp_dir": ("cihp", "cond", "conditional", "parse", "parsing", "parses",
+                 "label", "labels", "human_parse"),
+    "segmentation_dir": ("segmentation", "seg", "segm", "mask", "masks"),
+}
+
+
+def resolve_layout(root: Path, overrides: dict | None = None) -> dict[str, str | None]:
+    """Work out what each of the four dataset folders is actually called.
+
+    Tries, in order: an explicit override, an exact name match, a
+    case-insensitive match, then a substring match (so `cihp_maps` resolves to
+    the cihp role). Returns None for a role with no plausible folder.
+    """
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"dataset root not found: {root}")
+
+    present = {d.name.lower(): d.name for d in root.iterdir() if d.is_dir()}
+    overrides = overrides or {}
+    resolved: dict[str, str | None] = {}
+
+    for role, candidates in ROLE_FOLDERS.items():
+        override = overrides.get(role)
+        if override:
+            resolved[role] = override
+            continue
+
+        match = next((present[c] for c in candidates if c in present), None)
+        if match is None:
+            # Substring fallback: `cihp_maps`, `garment_images`, `seg_masks`.
+            match = next(
+                (actual for name, actual in sorted(present.items())
+                 if any(c in name for c in candidates)),
+                None,
+            )
+        resolved[role] = match
+
+    return resolved
+
+
+def describe_layout(root: Path, samples: int = 3) -> str:
+    """A human-readable report of what is in the dataset root.
+
+    Printed whenever matching fails. It shows each folder's file count,
+    extensions, and a few filenames alongside the normalised stem they reduce
+    to — which is what cross-folder matching actually compares. A mismatch is
+    then obvious at a glance instead of being guessed at.
+    """
+    root = Path(root)
+    lines = [f"Dataset root: {root}"]
+
+    directories = sorted(d for d in root.iterdir() if d.is_dir())
+    if not directories:
+        lines.append("  (no subfolders at all — is this the right root?)")
+
+    for directory in directories:
+        files = [f for f in sorted(directory.rglob("*"))
+                 if f.is_file() and not f.name.startswith(".")]
+        extensions = sorted({f.suffix.lower() for f in files})
+        subfolders = sorted(c.name for c in directory.iterdir() if c.is_dir())
+
+        lines.append(f"\n  {directory.name}/  —  {len(files)} files  "
+                     f"{extensions}  subfolders: {subfolders or '(none)'}")
+        for f in files[:samples]:
+            lines.append(f"      {f.relative_to(directory)}"
+                         f"   ->  key '{normalise_stem(f.stem)}'")
+
+    return "\n".join(lines)
+
 
 @dataclass
 class TripletRecord:
@@ -110,20 +185,34 @@ def index_folder(folder: Path, exts=ANY_EXTS) -> dict[tuple[str, str], Path]:
 
 def build_manifest(
     root: Path,
-    person_dir: str = "person",
-    garment_dir: str = "garments",
-    cihp_dir: str = "cihp",
-    segmentation_dir: str = "segmentation",
+    person_dir: str | None = "person",
+    garment_dir: str | None = "garments",
+    cihp_dir: str | None = "cihp",
+    segmentation_dir: str | None = "segmentation",
 ) -> list[TripletRecord]:
-    """Scan the dataset root and pair every person image with its conditionals."""
+    """Scan the dataset root and pair every person image with its conditionals.
+
+    Any of the folder names may be None (meaning "not present"); the resulting
+    records simply carry None for that field, and the caller decides whether
+    that is fatal.
+    """
     root = Path(root).resolve()
+    if not person_dir:
+        raise FileNotFoundError(
+            f"No person folder could be identified under {root}.\n\n"
+            + describe_layout(root)
+        )
+
     people = root / person_dir
     if not people.exists():
         raise FileNotFoundError(f"person folder not found: {people}")
 
-    garments = index_folder(root / garment_dir, IMAGE_EXTS)
-    cihps = index_folder(root / cihp_dir, ANY_EXTS)
-    segs = index_folder(root / segmentation_dir, ANY_EXTS)
+    index = lambda name, exts: (  # noqa: E731
+        index_folder(root / name, exts) if name else {}
+    )
+    garments = index(garment_dir, IMAGE_EXTS)
+    cihps = index(cihp_dir, ANY_EXTS)
+    segs = index(segmentation_dir, ANY_EXTS)
 
     records: list[TripletRecord] = []
     skipped: list[str] = []

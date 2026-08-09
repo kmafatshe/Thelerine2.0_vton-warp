@@ -8,7 +8,13 @@ from torch.utils.data import DataLoader
 
 from ..data.augment import PairedAugment
 from ..data.dataset import TripletVTONDataset, collate
-from ..data.manifest import build_manifest, read_manifest, split_records, write_manifest
+from ..data.manifest import (
+    build_manifest,
+    read_manifest,
+    resolve_layout,
+    split_records,
+    write_manifest,
+)
 
 
 def build_dataloaders(config):
@@ -19,17 +25,28 @@ def build_dataloaders(config):
     if manifest_path.exists() and not config.data.get("rebuild_manifest", False):
         train_records, val_records = read_manifest(manifest_path)
     else:
-        records = build_manifest(
-            root,
-            person_dir=config.data.get("person_dir", "person"),
-            garment_dir=config.data.get("garment_dir", "garments"),
-            cihp_dir=config.data.get("cihp_dir", "cihp"),
-            segmentation_dir=config.data.get("segmentation_dir", "segmentation"),
-        )
+        # Folder names are auto-detected unless the config names them, so a
+        # dataset using `cond/` and `seg/` trains without any edits.
+        layout = resolve_layout(root, {
+            role: config.data.get(role)
+            for role in ("person_dir", "garment_dir", "cihp_dir", "segmentation_dir")
+        })
+        print(f"[data] folders: " + ", ".join(
+            f"{role.replace('_dir', '')}={name or '(none)'}"
+            for role, name in layout.items()
+        ))
+
+        records = build_manifest(root, **layout)
         if not records:
             raise RuntimeError(
                 f"No samples found under {root}. Run scripts/check_dataset.py to "
                 "see how filenames were matched."
+            )
+        if not any(r.cihp or r.segmentation for r in records):
+            raise RuntimeError(
+                f"No parse maps matched under {root}, so the clothing-agnostic "
+                "input cannot be built. Run scripts/check_dataset.py for a "
+                "breakdown of what was found."
             )
         train_records, val_records = split_records(
             records, config.data.get("val_fraction", 0.15), config.get("seed", 42)
