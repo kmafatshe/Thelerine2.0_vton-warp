@@ -1,0 +1,82 @@
+# =============================================================================
+# Stage 1 — garment warping
+#
+# Tuning order when things look wrong:
+#   garment lands in the wrong place  -> raise loss.shape, train longer
+#   garment is torn / folded          -> raise loss.tv, loss.smooth, loss.grid
+#   garment is rigid, ignores the body-> raise model.max_displacement, lower tv
+#   overfits (train good, val bad)    -> raise augment.garment_* , lower model.base
+# =============================================================================
+
+seed: 42
+device: auto                     # auto | cpu | cuda | mps
+output_dir: outputs/warp
+
+data:
+  root: /path/to/your/dataset    # <-- the folder containing person/ garments/ cihp/ segmentation/
+  manifest: null                 # defaults to <root>/manifest.json
+  rebuild_manifest: false
+  person_dir: person
+  garment_dir: garments
+  cihp_dir: cihp
+  segmentation_dir: segmentation
+  # auto | garment_mask | person_mask | parse | ignore
+  segmentation_role: auto
+
+  height: 256
+  width: 192
+  garment_type: upper            # upper | lower | full
+  erase_dilate: 5                # px of slack around the erased garment region
+  val_fraction: 0.15
+
+augment:
+  enabled: true
+  hflip: 0.5
+  # Person jitter stays small: the parse map must keep describing the image.
+  person_shift: 0.04
+  person_scale: 0.06
+  person_rotate: 4.0
+  # Garment jitter is aggressive on purpose — it is what stops the warper
+  # collapsing to a near-identity transform. See data/augment.py.
+  garment_shift: 0.12
+  garment_scale: 0.18
+  garment_rotate: 12.0
+  brightness: 0.15
+  contrast: 0.15
+  saturation: 0.12
+
+model:
+  base: 32
+  feature_channels: 128
+  grid_size: 5                   # 5x5 = 25 TPS control points = 50 DOF
+  max_displacement: 0.12         # bound on the dense residual flow
+  use_residual_flow: true
+
+loss:
+  shape: 10.0                    # silhouette agreement — the main signal
+  coarse_shape: 2.0              # same, applied to the TPS-only result
+  pixel: 5.0                     # masked L1 on warped garment RGB
+  perceptual: 1.0                # set 0.0 to train without downloading VGG19
+  style: 0.0
+  # Path to a locally downloaded vgg19 state_dict, if torchvision cannot
+  # fetch it (548MB). See README section 5.
+  vgg_weights: null
+  grid: 2.0                      # TPS lattice regularity
+  tv: 4.0                        # first-order flow smoothness
+  smooth: 2.0                    # second-order flow smoothness
+
+train:
+  steps: 12000
+  batch_size: 4
+  accumulate: 1                  # raise instead of batch_size if RAM-bound
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  ema_decay: 0.999
+  num_workers: 0                 # 0 is faster than >0 for tiny datasets on CPU
+  # Pick up automatically from <output_dir>/*.pt if it exists. Set false
+  # to start clean. Essential on Colab, where sessions get cut off.
+  resume: true
+  log_every: 50
+  sample_every: 500
+  save_every: 1000

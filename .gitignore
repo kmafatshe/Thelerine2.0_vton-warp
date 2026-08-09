@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Training artefacts and local datasets (leading slash: repo root only, so
+# vtonwarp/data/ is still tracked).
+/data/
+/outputs/
+/results/
+*.pt
+manifest.json
