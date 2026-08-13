@@ -37,10 +37,10 @@ from vtonwarp.data.agnostic import (
 from vtonwarp.data.io import (
     canonicalise_garment,
     garment_mask_from_rgb,
-    load_image,
-    load_label_map,
     load_mask,
+    read_rgb,
 )
+from vtonwarp.data.quality import load_person
 from vtonwarp.data.labels import get_scheme, role_from_filename
 from vtonwarp.data.manifest import read_manifest
 from vtonwarp.engine.checkpoint import load_checkpoint
@@ -91,6 +91,8 @@ class TryOnPipeline:
         self.dilate = config.data.get("erase_dilate", 5)
         self.canonicalise = config.data.get("canonicalise_garment", True)
         self.garment_fill = config.data.get("garment_fill", 0.8)
+        self.crop_to_person = config.data.get("crop_to_person", True)
+        self.crop_margin = config.data.get("crop_margin", 0.15)
 
         warp_config = Config(load_checkpoint(config.train.warp_checkpoint,
                                              map_location="cpu")["config"])
@@ -129,9 +131,12 @@ class TryOnPipeline:
         mixed dataset means erasing the wrong garment — you would be putting a
         dress onto a body whose trousers were removed.
         """
-        person = load_image(Path(person_path), self.height, self.width)
-        parse = load_label_map(Path(parse_path), self.height, self.width,
-                               self.scheme.num_classes)
+        person, parse = load_person(
+            Path(person_path), Path(parse_path),
+            height=self.height, width=self.width,
+            num_classes=self.scheme.num_classes,
+            crop_to_person=self.crop_to_person, margin=self.crop_margin,
+        )
 
         if self.garment_type == "auto" and garment is not None:
             labels, _ = select_garment_labels(
@@ -146,14 +151,15 @@ class TryOnPipeline:
         return stack_condition(sample)[None], sample["agnostic"][None]
 
     def garment_from(self, garment_path, mask_path=None):
-        garment = load_image(Path(garment_path), self.height, self.width)
+        garment = read_rgb(Path(garment_path))
         if mask_path:
-            mask = load_mask(Path(mask_path), self.height, self.width)
+            mask = load_mask(Path(mask_path), *garment.shape[-2:])
         else:
             mask = garment_mask_from_rgb(garment)
-        if self.canonicalise:
-            garment, mask = canonicalise_garment(garment, mask,
-                                                 fill=self.garment_fill)
+        garment, mask = canonicalise_garment(
+            garment, mask, self.height, self.width,
+            fill=self.garment_fill if self.canonicalise else 1.0,
+        )
         return garment[None], mask[None]
 
     @torch.no_grad()

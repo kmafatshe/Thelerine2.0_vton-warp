@@ -41,6 +41,14 @@ data:
   # for every sample with upper | lower | full.
   garment_type: auto
 
+  # Crop each photo to the person's bounding box, at native resolution.
+  # Source images that are scenes rather than studio shots leave the
+  # garment covering ~3% of the frame; cropping is the largest quality
+  # lever available on such data. check_dataset.py --audit reports the
+  # resulting garment coverage.
+  crop_to_person: true
+  crop_margin: 0.15
+
   # Crop each garment to its mask and rescale, so framing is consistent.
   canonicalise_garment: true
   garment_fill: 0.8

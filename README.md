@@ -244,6 +244,24 @@ this — a single global `garment_type` would train the model to warp trousers
 onto a T-shirt's silhouette. Force one region for the whole dataset with
 `upper`, `lower` or `full`.
 
+### Framing — crop to the person
+
+`data.crop_to_person: true` (the default) crops each photo to the person's
+bounding box **at native resolution**, then resizes once.
+
+This matters enormously when the source images are scenes rather than studio
+shots. If the person occupies 10% of a landscape photo, the garment region is
+~3% of the frame — try-on happening on a postage stamp, with the network
+spending its capacity on grass and sky. Measured on synthetic data framed that
+way, cropping moves the median garment coverage from **1.9% to 16.9%**, and
+samples that were previously unusable (`NO_GARMENT`) become usable.
+
+Cropping at native resolution is the point: downscaling a 4000px photo to 256px
+and *then* cropping reconstructs the person from the few pixels that survived.
+The box is grown to the frame's aspect ratio, never shrunk, so nothing is cut
+off and the resize introduces no distortion. `check_dataset.py --audit` reports
+the resulting coverage; `--no-crop` compares.
+
 ### Garment framing
 
 `data.canonicalise_garment: true` crops each product shot to its mask and

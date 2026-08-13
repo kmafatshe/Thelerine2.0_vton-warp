@@ -20,15 +20,9 @@ from torch.utils.data import Dataset
 
 from .agnostic import build_agnostic, select_garment_labels, stack_condition
 from .augment import PairedAugment
-from .io import (
-    canonicalise_garment,
-    garment_mask_from_rgb,
-    load_image,
-    load_label_map,
-    load_mask,
-)
+from .io import canonicalise_garment, read_rgb, resize_labels, resize_rgb
 from .labels import get_scheme, role_from_filename
-from .quality import resolve_garment_mask
+from .quality import load_person, resolve_garment_mask
 from .manifest import TripletRecord
 
 
@@ -47,6 +41,8 @@ class TripletVTONDataset(Dataset):
         parse_source: str = "auto",
         canonicalise: bool = True,
         garment_fill: float = 0.8,
+        crop_to_person: bool = True,
+        crop_margin: float = 0.15,
     ):
         """
         Args:
@@ -65,6 +61,10 @@ class TripletVTONDataset(Dataset):
                 "auto" | "garment_mask" | "person_mask" | "parse" | "ignore"
             canonicalise: crop each garment to its mask and rescale to a
                 consistent size before it reaches the network.
+            crop_to_person: crop each photo to the person's bounding box, at
+                native resolution. Essential when the source images are scenes
+                rather than studio shots — otherwise try-on happens on a few
+                thousand pixels in the middle of a landscape.
         """
         self.root = Path(root).resolve()
         self.records = records
@@ -78,6 +78,8 @@ class TripletVTONDataset(Dataset):
         self.parse_source = parse_source
         self.canonicalise = canonicalise
         self.garment_fill = garment_fill
+        self.crop_to_person = crop_to_person
+        self.crop_margin = crop_margin
 
     def __len__(self) -> int:
         return len(self.records)
@@ -88,16 +90,27 @@ class TripletVTONDataset(Dataset):
         record = self.records[index]
         paths = record.resolve(self.root)
 
-        person = load_image(paths["person"], self.height, self.width)
-        garment = load_image(paths["garment"], self.height, self.width)
+        person, parse = load_person(
+            paths["person"], self._parse_path(paths),
+            height=self.height, width=self.width,
+            num_classes=self.scheme.num_classes,
+            crop_to_person=self.crop_to_person, margin=self.crop_margin,
+        )
 
-        parse = self._load_parse(paths)
+        # The garment is masked and cropped at its own native resolution, so a
+        # garment occupying a small part of a large photo keeps its detail.
+        garment = read_rgb(paths["garment"])
         garment_mask = self._load_garment_mask(paths, garment)
 
         if self.canonicalise:
             garment, garment_mask = canonicalise_garment(
-                garment, garment_mask, fill=self.garment_fill
+                garment, garment_mask, self.height, self.width,
+                fill=self.garment_fill,
             )
+        else:
+            garment = resize_rgb(garment, self.height, self.width)
+            garment_mask = resize_labels(
+                garment_mask.long(), self.height, self.width).float()
 
         person, parse, garment, garment_mask = self.augment(
             person, parse, garment, garment_mask
@@ -129,17 +142,14 @@ class TripletVTONDataset(Dataset):
 
     # ------------------------------------------------------------------
 
-    def _load_parse(self, paths: dict) -> torch.Tensor:
-        """Get the label map from the configured source."""
-        if self.parse_source == "auto":
-            order = ("cihp", "segmentation")
-        else:
-            order = (self.parse_source,)
+    def _parse_path(self, paths: dict):
+        """Path to the label map from the configured source."""
+        order = ("cihp", "segmentation") if self.parse_source == "auto" \
+            else (self.parse_source,)
 
         for field in order:
             if paths.get(field) is not None:
-                return load_label_map(paths[field], self.height, self.width,
-                                      self.scheme.num_classes)
+                return paths[field]
 
         raise FileNotFoundError(
             f"No parse map for this sample from source {self.parse_source!r}. "
@@ -150,7 +160,7 @@ class TripletVTONDataset(Dataset):
     def _load_garment_mask(self, paths: dict, garment: torch.Tensor) -> torch.Tensor:
         """Mask of the flat garment. Shared with the checker via `quality`."""
         return resolve_garment_mask(
-            paths, garment, height=self.height, width=self.width,
+            paths, garment, height=garment.shape[-2], width=garment.shape[-1],
             parse_source=self.parse_source,
             segmentation_role=self.segmentation_role,
         )

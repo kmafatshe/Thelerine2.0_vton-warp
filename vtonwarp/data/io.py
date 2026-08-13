@@ -39,16 +39,88 @@ def _read_array(path: Path) -> np.ndarray:
     return np.array(image.convert("L"))
 
 
-def load_image(path: Path, height: int, width: int) -> torch.Tensor:
-    """RGB image -> (3, H, W) float tensor scaled to [-1, 1]."""
-    image = Image.open(path).convert("RGB").resize((width, height), Image.BICUBIC)
+def read_rgb(path: Path) -> torch.Tensor:
+    """RGB image at its native resolution -> (3, H, W) in [-1, 1].
+
+    Cropping must happen at native resolution. Resizing a 4000px photo down to
+    256px and *then* cropping to the person throws away the detail before it can
+    be used: the person ends up reconstructed from the handful of pixels that
+    survived, not from the pixels the camera actually captured.
+    """
+    image = Image.open(path).convert("RGB")
     tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
     return tensor * 2.0 - 1.0
 
 
-def load_label_map(path: Path, height: int, width: int,
-                   num_classes: int = 20) -> torch.Tensor:
-    """Any parse encoding -> (1, H, W) int64 tensor of class ids."""
+def resize_rgb(image: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    return F.interpolate(image[None], size=(height, width), mode="bilinear",
+                         align_corners=False, antialias=True)[0]
+
+
+def resize_labels(labels: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Nearest-neighbour: label ids must never be interpolated."""
+    out = F.interpolate(labels[None].float(), size=(height, width), mode="nearest")
+    return out[0].long()
+
+
+def bbox_from_mask(mask: torch.Tensor, margin: float = 0.0,
+                   aspect: float | None = None) -> tuple[int, int, int, int]:
+    """Bounding box of a mask as (top, left, height, width).
+
+    Args:
+        mask: (1, H, W) in [0, 1].
+        margin: fraction of the box size to add on each side, so a crop keeps
+            some context rather than cutting flush against the shoulders.
+        aspect: width / height to force. The box is *grown* on the short axis
+            rather than shrunk, so nothing inside it is ever cut off, and the
+            later resize introduces no distortion.
+    """
+    _, height, width = mask.shape
+    rows = torch.nonzero(mask[0].amax(dim=1) > 0.5).flatten()
+    cols = torch.nonzero(mask[0].amax(dim=0) > 0.5).flatten()
+    if rows.numel() == 0 or cols.numel() == 0:
+        return 0, 0, height, width
+
+    top, bottom = int(rows[0]), int(rows[-1]) + 1
+    left, right = int(cols[0]), int(cols[-1]) + 1
+    box_h, box_w = bottom - top, right - left
+
+    pad_y = int(box_h * margin)
+    pad_x = int(box_w * margin)
+    top, bottom = top - pad_y, bottom + pad_y
+    left, right = left - pad_x, right + pad_x
+
+    if aspect is not None:
+        box_h, box_w = bottom - top, right - left
+        if box_w / max(box_h, 1) < aspect:
+            target = int(box_h * aspect)
+            centre = (left + right) // 2
+            left, right = centre - target // 2, centre - target // 2 + target
+        else:
+            target = int(box_w / aspect)
+            centre = (top + bottom) // 2
+            top, bottom = centre - target // 2, centre - target // 2 + target
+
+    # Shift back inside the image rather than clipping, so the aspect ratio the
+    # caller asked for survives; only clamp if the box is larger than the image.
+    box_h, box_w = bottom - top, right - left
+    top = max(0, min(top, height - box_h))
+    left = max(0, min(left, width - box_w))
+    return top, left, min(box_h, height - top), min(box_w, width - left)
+
+
+def crop(tensor: torch.Tensor, box: tuple[int, int, int, int]) -> torch.Tensor:
+    top, left, height, width = box
+    return tensor[:, top:top + height, left:left + width]
+
+
+def load_image(path: Path, height: int, width: int) -> torch.Tensor:
+    """RGB image -> (3, H, W) float tensor scaled to [-1, 1]."""
+    return resize_rgb(read_rgb(path), height, width)
+
+
+def read_labels(path: Path, num_classes: int = 20) -> torch.Tensor:
+    """Any parse encoding -> (1, H, W) int64 class ids at native resolution."""
     array = _read_array(Path(path))
 
     if array.ndim == 3:
@@ -70,13 +142,13 @@ def load_label_map(path: Path, height: int, width: int,
         scale = 255.0 / (num_classes - 1)
         labels = torch.round(labels.float() / scale).long()
 
-    labels = labels.clamp(0, num_classes - 1)
+    return labels.clamp(0, num_classes - 1)[None]
 
-    # Nearest-neighbour resize: label ids must never be interpolated.
-    labels = F.interpolate(
-        labels[None, None].float(), size=(height, width), mode="nearest"
-    )
-    return labels[0].long()
+
+def load_label_map(path: Path, height: int, width: int,
+                   num_classes: int = 20) -> torch.Tensor:
+    """Any parse encoding -> (1, H, W) int64 tensor, resized to the frame."""
+    return resize_labels(read_labels(path, num_classes), height, width)
 
 
 def load_mask(path: Path, height: int, width: int) -> torch.Tensor:
@@ -173,44 +245,41 @@ def _largest_component(mask: torch.Tensor) -> torch.Tensor:
 
 
 def canonicalise_garment(garment: torch.Tensor, mask: torch.Tensor,
+                         height: int | None = None, width: int | None = None,
                          fill: float = 0.8, pad_value: float = 0.0):
-    """Crop a garment to its mask and rescale it to a consistent size.
+    """Crop a garment to its mask and place it in a frame at a consistent size.
 
-    Your product shots vary enormously in framing — some fill the frame, some
-    are a thumbnail in the middle of a large black canvas. That variation lands
-    entirely on the warper, which then has to learn a 10x scale change *and* the
-    body-shape deformation from a handful of examples.
+    Product shots vary enormously in framing — some fill the frame, some are a
+    thumbnail on a large canvas. That variation lands entirely on the warper,
+    which then has to learn a large scale change *and* the body-shape
+    deformation, from a handful of examples.
 
-    Normalising the framing here removes that burden: after this, every garment
-    enters the network at roughly the same scale, and the TPS only has to
-    express the deformation that is actually interesting.
+    Given `height`/`width` this crops at the input's own resolution and resizes
+    once into the target frame, so a garment occupying 3% of a large photo keeps
+    the detail that 3% actually contains. Without them it operates in place, at
+    whatever resolution it was handed.
 
     Args:
         garment: (3, H, W) in [-1, 1].
         mask: (1, H, W) in [0, 1].
         fill: fraction of the frame the garment's longest side should occupy.
     """
-    _, height, width = garment.shape
-    rows = mask[0].amax(dim=1)
-    cols = mask[0].amax(dim=0)
-    if rows.max() <= 0 or cols.max() <= 0:
-        return garment, mask
+    if height is None or width is None:
+        height, width = garment.shape[-2:]
 
-    y = torch.nonzero(rows > 0.5).flatten()
-    x = torch.nonzero(cols > 0.5).flatten()
-    top, bottom = int(y[0]), int(y[-1]) + 1
-    left, right = int(x[0]), int(x[-1]) + 1
+    box = bbox_from_mask(mask)
+    if box[2] <= 0 or box[3] <= 0:
+        return resize_rgb(garment, height, width), resize_labels(
+            mask.long(), height, width).float()
 
-    cropped = garment[:, top:bottom, left:right]
-    cropped_mask = mask[:, top:bottom, left:right]
+    cropped = crop(garment, box)
+    cropped_mask = crop(mask, box)
 
-    # Scale so the longer side reaches `fill` of the frame, preserving aspect.
-    crop_h, crop_w = bottom - top, right - left
+    crop_h, crop_w = cropped.shape[-2:]
     scale = min(height * fill / crop_h, width * fill / crop_w)
     new_h, new_w = max(1, round(crop_h * scale)), max(1, round(crop_w * scale))
 
-    resized = F.interpolate(cropped[None], size=(new_h, new_w), mode="bilinear",
-                            align_corners=False)[0]
+    resized = resize_rgb(cropped, new_h, new_w)
     resized_mask = F.interpolate(cropped_mask[None], size=(new_h, new_w),
                                  mode="nearest")[0]
 

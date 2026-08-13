@@ -33,13 +33,7 @@ from collections import Counter
 import torch
 
 from vtonwarp.data.agnostic import build_agnostic, select_garment_labels
-from vtonwarp.data.io import (
-    canonicalise_garment,
-    garment_mask_from_rgb,
-    load_image,
-    load_label_map,
-    load_mask,
-)
+from vtonwarp.data.io import canonicalise_garment, load_mask, read_rgb
 from vtonwarp.data.labels import (
     ATR,
     CIHP,
@@ -49,6 +43,7 @@ from vtonwarp.data.labels import (
 )
 from vtonwarp.data.manifest import build_manifest, describe_layout, resolve_layout
 from vtonwarp.data.quality import audit as quality_audit
+from vtonwarp.data.quality import load_person
 from vtonwarp.data.quality import resolve_garment_mask
 from vtonwarp.engine.visualize import contact_sheet
 
@@ -67,6 +62,9 @@ def parse_args():
                         help="cihp (= LIP, 20 classes) or atr (18 classes)")
     parser.add_argument("--diagnose-labels", action="store_true",
                         help="score each parsing convention against the data")
+    parser.add_argument("--no-crop", action="store_true",
+                        help="do not crop photos to the person")
+    parser.add_argument("--crop-margin", type=float, default=0.15)
     parser.add_argument("--audit", action="store_true",
                         help="per-sample quality report over the whole dataset")
     parser.add_argument("--parse-source", default="auto",
@@ -139,6 +137,7 @@ def main():
 
     label_counter = Counter()
     coverage = []
+    mask_fractions = []
     seg_means = []
     chosen = Counter()
     skipped = 0
@@ -156,9 +155,12 @@ def main():
             skipped += 1
             continue
 
-        person = load_image(paths["person"], args.height, args.width)
-        garment = load_image(paths["garment"], args.height, args.width)
-        parse = load_label_map(source, args.height, args.width, scheme.num_classes)
+        person, parse = load_person(
+            paths["person"], source, height=args.height, width=args.width,
+            num_classes=scheme.num_classes,
+            crop_to_person=not args.no_crop, margin=args.crop_margin,
+        )
+        garment = read_rgb(paths["garment"])
         label_counter.update(parse.unique().tolist())
 
         parse_field = ('segmentation'
@@ -167,8 +169,10 @@ def main():
                            and paths['cihp'] is None)
                        else 'cihp')
         mask = _garment_mask(paths, garment, args, parse_field=parse_field)
-        if not args.no_canonicalise:
-            garment, mask = canonicalise_garment(garment, mask)
+        raw_mask_fraction = float(mask.mean())
+        garment, mask = canonicalise_garment(
+            garment, mask, args.height, args.width,
+            fill=1.0 if args.no_canonicalise else 0.8)
 
         if args.garment_type == "auto":
             labels, _ = select_garment_labels(
@@ -195,6 +199,7 @@ def main():
         columns["shape"].append(sample["shape"])
         columns["garment"].append(garment)
         columns["garment mask"].append(mask)
+        mask_fractions.append(raw_mask_fraction)
         columns["target garment"].append(sample["target_garment"])
 
     if skipped:
@@ -219,8 +224,9 @@ def main():
         print("        !! garment covers most of the frame — the parse map may be a "
               "silhouette rather than a class map.")
 
-    mean_mask = float(torch.stack(columns["garment mask"]).mean())
-    print(f"[check] flat-garment mask covers {mean_mask * 100:.1f}% of the frame")
+    mean_mask = sum(mask_fractions) / len(mask_fractions)
+    print(f"[check] flat-garment mask covers {mean_mask * 100:.1f}% of its "
+          f"product shot (before canonicalisation)")
     if mean_mask > 0.9:
         print("        !! the garment mask is almost the whole frame, so background\n"
               "           will be warped onto the body. Provide explicit garment\n"
@@ -257,6 +263,7 @@ def audit(records, root, args, scheme, max_listed: int = 40):
     reports = quality_audit(
         records, root, height=args.height, width=args.width, scheme=scheme,
         parse_source=args.parse_source, canonicalise=not args.no_canonicalise,
+        crop_to_person=not args.no_crop, crop_margin=args.crop_margin,
     )
     flagged = [r for r in reports if r.flags]
 
@@ -294,7 +301,7 @@ def audit(records, root, args, scheme, max_listed: int = 40):
 def _garment_mask(paths, garment, args, parse_field=None):
     """Delegates to the shared resolver so the check reflects training."""
     return resolve_garment_mask(
-        paths, garment, height=args.height, width=args.width,
+        paths, garment, height=garment.shape[-2], width=garment.shape[-1],
         parse_source=("segmentation" if parse_field == "segmentation"
                       else args.parse_source),
     )
@@ -344,16 +351,19 @@ def diagnose_labels(records, root, args, limit: int = 12):
         samples, max_label = [], 0
         for record in usable:
             paths = record.resolve(root)
-            person = load_image(paths["person"], args.height, args.width)
-            garment = load_image(paths["garment"], args.height, args.width)
             # Load with a generous class count so nothing is clamped away
             # before we know which scheme applies.
-            parse = load_label_map(paths[field], args.height, args.width, 32)
+            person, parse = load_person(
+                paths["person"], paths[field], height=args.height,
+                width=args.width, num_classes=32,
+                crop_to_person=not args.no_crop, margin=args.crop_margin,
+            )
+            garment = read_rgb(paths["garment"])
             max_label = max(max_label, int(parse.max()))
 
             mask = _garment_mask(paths, garment, args, parse_field=field)
-            if not args.no_canonicalise:
-                garment, mask = canonicalise_garment(garment, mask)
+            garment, mask = canonicalise_garment(garment, mask, args.height,
+                                                 args.width)
             samples.append((person, garment, parse, mask))
 
         print(f"  {source_name}: {len(samples)} samples, class ids 0..{max_label}")

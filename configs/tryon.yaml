@@ -39,6 +39,14 @@ data:
   # what the agnostic input means. See configs/warp.yaml for the explanations.
   label_scheme: cihp
   garment_type: auto
+  # Crop each photo to the person's bounding box, at native resolution.
+  # Source images that are scenes rather than studio shots leave the
+  # garment covering ~3% of the frame; cropping is the largest quality
+  # lever available on such data. check_dataset.py --audit reports the
+  # resulting garment coverage.
+  crop_to_person: true
+  crop_margin: 0.15
+
   canonicalise_garment: true
   garment_fill: 0.8
   # Drop samples that fail the per-sample quality audit (noisy parse

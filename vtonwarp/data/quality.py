@@ -22,11 +22,15 @@ import torch
 
 from .agnostic import select_garment_labels
 from .io import (
+    bbox_from_mask,
     canonicalise_garment,
+    crop,
     garment_mask_from_rgb,
-    load_image,
-    load_label_map,
     load_mask,
+    read_labels,
+    read_rgb,
+    resize_labels,
+    resize_rgb,
 )
 from .labels import LabelScheme, mask_from_labels, role_from_filename
 
@@ -92,6 +96,39 @@ def resolve_garment_mask(paths: dict, garment: torch.Tensor, *, height: int,
     return garment_mask_from_rgb(garment)
 
 
+def load_person(person_path, parse_path, *, height: int, width: int,
+                num_classes: int, crop_to_person: bool = True,
+                margin: float = 0.15):
+    """Load a person and their parse map, optionally cropped to the person.
+
+    Your photos are scenes: the person can occupy 3% of the frame, so the
+    garment region the warper has to hit is a few thousand pixels and the try-on
+    happens on a postage stamp. Cropping to the person's bounding box is what
+    VITON-style datasets do by construction, and it is the single largest
+    quality lever left on data like this.
+
+    The crop is taken at native resolution and resized once, so the detail that
+    3% of a large photo actually contains is preserved rather than discarded by
+    an early downscale. The box is grown to the frame's aspect ratio so nothing
+    is cut off and the resize introduces no distortion.
+    """
+    person = read_rgb(person_path)
+    parse = read_labels(parse_path, num_classes)
+
+    # Parse maps are often exported at a different resolution to the photo.
+    if parse.shape[-2:] != person.shape[-2:]:
+        parse = resize_labels(parse, *person.shape[-2:])
+
+    if crop_to_person:
+        silhouette = (parse > 0).float()
+        if silhouette.sum() > 0:
+            box = bbox_from_mask(silhouette, margin=margin,
+                                 aspect=width / height)
+            person, parse = crop(person, box), crop(parse, box)
+
+    return resize_rgb(person, height, width), resize_labels(parse, height, width)
+
+
 def flags_for(measures: dict, confident: bool, thresholds: dict | None = None) -> list[str]:
     """Name the failure modes a sample exhibits."""
     limits = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
@@ -123,7 +160,8 @@ def flags_for(measures: dict, confident: bool, thresholds: dict | None = None) -
 def inspect_record(record, root: Path, *, height: int, width: int,
                    scheme: LabelScheme, parse_source: str = "auto",
                    segmentation_role: str = "auto", canonicalise: bool = True,
-                   garment_fill: float = 0.8,
+                   garment_fill: float = 0.8, crop_to_person: bool = True,
+                   crop_margin: float = 0.15,
                    thresholds: dict | None = None) -> SampleReport:
     """Measure one sample exactly as training would load it."""
     paths = record.resolve(root)
@@ -133,13 +171,17 @@ def inspect_record(record, root: Path, *, height: int, width: int,
         return SampleReport(record.key, ["NO_PARSE_FILE"], {})
 
     try:
-        person = load_image(paths["person"], height, width)
-        garment = load_image(paths["garment"], height, width)
-        parse = load_label_map(paths[field], height, width, scheme.num_classes)
+        person, parse = load_person(
+            paths["person"], paths[field], height=height, width=width,
+            num_classes=scheme.num_classes, crop_to_person=crop_to_person,
+            margin=crop_margin,
+        )
+        garment = read_rgb(paths["garment"])
     except Exception as error:
         return SampleReport(record.key, [f"UNREADABLE({type(error).__name__})"], {})
 
-    mask = resolve_garment_mask(paths, garment, height=height, width=width,
+    mask = resolve_garment_mask(paths, garment, height=garment.shape[-2],
+                                width=garment.shape[-1],
                                 parse_source=parse_source,
                                 segmentation_role=segmentation_role)
 
@@ -152,7 +194,11 @@ def inspect_record(record, root: Path, *, height: int, width: int,
     raw_mask_fraction = float(mask.mean())
 
     if canonicalise:
-        garment, mask = canonicalise_garment(garment, mask, fill=garment_fill)
+        garment, mask = canonicalise_garment(garment, mask, height, width,
+                                             fill=garment_fill)
+    else:
+        garment = resize_rgb(garment, height, width)
+        mask = resize_labels(mask.long(), height, width).float()
 
     labels, confident = select_garment_labels(
         scheme, parse, person, garment, mask,

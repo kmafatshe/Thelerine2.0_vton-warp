@@ -49,6 +49,8 @@ def _drop_flagged(records, config, label: str):
         segmentation_role=config.data.get("segmentation_role", "auto"),
         canonicalise=config.data.get("canonicalise_garment", True),
         garment_fill=config.data.get("garment_fill", 0.8),
+        crop_to_person=config.data.get("crop_to_person", True),
+        crop_margin=config.data.get("crop_margin", 0.15),
     )
     bad = {r.key for r in reports if r.flags}
     keep = [r for r in records if r.key not in bad]
@@ -139,6 +141,8 @@ def build_dataloaders(config):
         parse_source=config.data.get("parse_source", "auto"),
         canonicalise=config.data.get("canonicalise_garment", True),
         garment_fill=config.data.get("garment_fill", 0.8),
+        crop_to_person=config.data.get("crop_to_person", True),
+        crop_margin=config.data.get("crop_margin", 0.15),
     )
 
     augment = PairedAugment(**dict(config.get("augment", {})))
