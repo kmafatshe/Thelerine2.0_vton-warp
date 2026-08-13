@@ -187,7 +187,29 @@ greyscale PNGs with scaled class ids. Colourised RGB parse visualisations are
 rejected with an explicit error rather than silently misread — export raw label
 indices.
 
-### Label conventions — get this right first
+### Which folder holds the parse map?
+
+A dataset can carry two conditional folders where only one is a label map. The
+other may be pose heatmaps or one-hot probabilities — and `argmax` turns those
+into a perfectly well-formed parse map that describes nothing, with no error
+anywhere. `check_dataset.py` reports what each folder actually contains:
+
+```
+  cond/  —  39 files  ['.npy']
+      contents: shape=(18, 256, 192) dtype=float32 18-channel stack —
+                one-hot/probabilities or pose heatmaps, NOT a label map
+  seg/   —  47 files  ['.npy']
+      contents: shape=(256, 192) dtype=uint8 integer label map, ids [0, 2, 5, 9, 13]
+```
+
+`--diagnose-labels` scores every (folder, convention) combination, so both
+questions are answered at once. Set `data.parse_source` to the winner.
+
+When `segmentation/` is the parse source it describes the *person*, so it is no
+longer used as the flat garment's mask — otherwise the product shot would be
+masked with a body silhouette.
+
+### Label conventions — get this right too
 
 A parse map is only integers; the taxonomy that produced them decides what those
 integers mean, and the two common ones disagree precisely where it hurts:

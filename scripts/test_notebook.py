@@ -35,6 +35,7 @@ SUBSTITUTIONS = [
     ("BATCH_SIZE = 8", "BATCH_SIZE = 2"),
     ("'--limit', 5", "'--limit', 2"),
     ("TRYON_STEPS + 4000", "TRYON_STEPS + 4"),
+    ("PARSE_SOURCE = 'segmentation'", "PARSE_SOURCE = 'segmentation'"),
     ("'/content/dataset_check.png'", f"'{OUT}/dataset_check.png'"),
     # Skip the VGG download in a smoke run.
     ("'train.num_workers=2',", "'train.num_workers=0', 'loss.perceptual=0.0',"),

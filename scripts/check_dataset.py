@@ -59,6 +59,8 @@ def parse_args():
                         help="cihp (= LIP, 20 classes) or atr (18 classes)")
     parser.add_argument("--diagnose-labels", action="store_true",
                         help="score each parsing convention against the data")
+    parser.add_argument("--parse-source", default="auto",
+                        choices=("auto", "cihp", "segmentation"))
     parser.add_argument("--no-canonicalise", action="store_true")
     parser.add_argument("--out", default="outputs/dataset_check.png")
     parser.add_argument("--samples", type=int, default=6)
@@ -134,7 +136,8 @@ def main():
         if len(columns["person"]) >= args.samples:
             break
         paths = record.resolve(root)
-        source = paths["cihp"] or paths["segmentation"]
+        source = (paths.get(args.parse_source) if args.parse_source != "auto"
+                  else paths["cihp"] or paths["segmentation"])
         if source is None:
             skipped += 1
             continue
@@ -144,7 +147,12 @@ def main():
         parse = load_label_map(source, args.height, args.width, scheme.num_classes)
         label_counter.update(parse.unique().tolist())
 
-        mask = _garment_mask(paths, garment, args)
+        parse_field = ('segmentation'
+                       if args.parse_source == 'segmentation'
+                       or (args.parse_source == 'auto'
+                           and paths['cihp'] is None)
+                       else 'cihp')
+        mask = _garment_mask(paths, garment, args, parse_field=parse_field)
         if not args.no_canonicalise:
             garment, mask = canonicalise_garment(garment, mask)
 
@@ -160,7 +168,7 @@ def main():
         sample = build_agnostic(person, parse, scheme, labels)
         coverage.append(float(sample["garment_mask"].mean()))
 
-        if paths["segmentation"] is not None:
+        if paths["segmentation"] is not None and parse_field != "segmentation":
             seg_means.append(float(load_mask(paths["segmentation"],
                                              args.height, args.width).mean()))
 
@@ -204,6 +212,9 @@ def main():
               "           will be warped onto the body. Provide explicit garment\n"
               "           masks, or check the product shots have a plain background.")
 
+    if parse_field == "segmentation":
+        print("[check] segmentation/ is being read as the parse map "
+              "(data.parse_source), so it is not also used as the garment mask")
     if seg_means:
         mean_seg = sum(seg_means) / len(seg_means)
         guess = ("garment mask" if 0.02 < mean_seg < 0.4
@@ -219,9 +230,15 @@ def main():
     print("        'target garment': must show the same garment as the 'garment' column.")
 
 
-def _garment_mask(paths, garment, args):
-    """Same precedence the dataset uses, so the check reflects training."""
-    if paths["segmentation"] is not None:
+def _garment_mask(paths, garment, args, parse_field=None):
+    """Same precedence the dataset uses, so the check reflects training.
+
+    `parse_field` names the folder the label map is being read from. If that is
+    the segmentation folder then it describes the *person*, and using it as the
+    flat garment's mask would mask a product shot with a body silhouette —
+    which quietly wrecks the colour comparison this diagnostic depends on.
+    """
+    if paths["segmentation"] is not None and parse_field != "segmentation":
         mask = load_mask(paths["segmentation"], args.height, args.width)
         if 0.02 < mask.mean().item() < 0.75:
             return (mask > 0.5).float()
@@ -229,121 +246,143 @@ def _garment_mask(paths, garment, args):
 
 
 def diagnose_labels(records, root, args, limit: int = 12):
-    """Decide which parsing convention the maps follow.
+    """Decide which folder holds the parse map, and which convention it uses.
 
-    Three convention-independent tests, none of which needs the answer in
-    advance:
+    Both questions are silent failures. A dataset can carry two conditional
+    folders where only one is a label map — the other being pose heatmaps or
+    one-hot probabilities, which argmax turns into a well-formed parse map that
+    describes nothing. And a real label map still means nothing until you know
+    whether id 5 is "upper clothes" (CIHP) or "skirt" (ATR).
+
+    So every (folder, scheme) combination is scored on three
+    convention-independent tests:
 
     * **Colour match** (the strongest). The parse region a garment was cut from
-      should match that garment's colour. A scheme whose "garment" ids point at
-      the trousers when the garment is a shirt scores badly here.
-    * **Vertical position.** Whatever ids mean face/hair/hat must sit near the
-      top of the image, and shoes near the bottom.
-    * **Coverage.** A scheme whose garment ids find no sizeable region in most
-      samples is not describing this data.
+      should match that garment's colour.
+    * **Vertical position.** Ids meaning face/hair/hat must sit near the top of
+      the image, and shoes near the bottom. A combination that puts heads at
+      mid-height is not describing this person.
+    * **Coverage.** Garment ids that find no sizeable region in most samples are
+      not describing this data.
 
-    A component with no data in a given scheme is *excluded* rather than given a
-    neutral value — an earlier version defaulted absent labels to the midpoint,
-    which flattered whichever scheme happened to have fewer of its labels
-    present and picked the wrong answer on data I knew the ground truth for.
+    A component with no data is *excluded* rather than given a neutral value —
+    defaulting absent labels to the midpoint flattered whichever scheme had
+    fewer of its labels present, and picked the wrong answer on data with known
+    ground truth.
     """
-    print("\n[diagnose] scoring parsing conventions against the data...\n")
+    print("\n[diagnose] scoring parse sources and conventions...\n")
 
-    samples = []
-    max_label = 0
-    for record in records[:limit]:
-        paths = record.resolve(root)
-        source = paths["cihp"] or paths["segmentation"]
-        if source is None:
-            continue
-        person = load_image(paths["person"], args.height, args.width)
-        garment = load_image(paths["garment"], args.height, args.width)
-        # Load with a generous class count so nothing is clamped away before we
-        # know which scheme applies.
-        parse = load_label_map(source, args.height, args.width, 32)
-        max_label = max(max_label, int(parse.max()))
+    sources = [
+        (name, field) for name, field in
+        (("cihp folder", "cihp"), ("segmentation folder", "segmentation"))
+        if any(getattr(r, field) for r in records)
+    ]
+    if not sources:
+        raise SystemExit("no conditional files at all — nothing to diagnose")
 
-        mask = _garment_mask(paths, garment, args)
-        if not args.no_canonicalise:
-            garment, mask = canonicalise_garment(garment, mask)
-        samples.append((person, garment, parse, mask))
-
-    if not samples:
-        raise SystemExit("no usable samples to diagnose")
-
-    print(f"  parse maps contain class ids 0..{max_label}\n")
     results = []
-
-    for scheme in (CIHP, ATR):
-        if max_label >= scheme.num_classes:
-            print(f"  {scheme.name:<6} RULED OUT — data contains id {max_label}, "
-                  f"but this scheme only defines 0..{scheme.num_classes - 1}")
+    for source_name, field in sources:
+        usable = [r for r in records if getattr(r, field)][:limit]
+        if not usable:
             continue
 
-        identity_y, feet_y, colour, found = [], [], [], 0
+        samples, max_label = [], 0
+        for record in usable:
+            paths = record.resolve(root)
+            person = load_image(paths["person"], args.height, args.width)
+            garment = load_image(paths["garment"], args.height, args.width)
+            # Load with a generous class count so nothing is clamped away
+            # before we know which scheme applies.
+            parse = load_label_map(paths[field], args.height, args.width, 32)
+            max_label = max(max_label, int(parse.max()))
 
-        for person, garment, parse, mask in samples:
-            y = _mean_y(parse, scheme.identity)
-            if y is not None:
-                identity_y.append(y)
-            y = _mean_y(parse, scheme.feet)
-            if y is not None:
-                feet_y.append(y)
+            mask = _garment_mask(paths, garment, args, parse_field=field)
+            if not args.no_canonicalise:
+                garment, mask = canonicalise_garment(garment, mask)
+            samples.append((person, garment, parse, mask))
 
-            area = mask.sum()
-            if area <= 0:
+        print(f"  {source_name}: {len(samples)} samples, class ids 0..{max_label}")
+
+        for scheme in (CIHP, ATR):
+            if max_label >= scheme.num_classes:
+                print(f"      {scheme.name:<6} ruled out — contains id {max_label}, "
+                      f"scheme defines 0..{scheme.num_classes - 1}")
                 continue
-            garment_colour = (garment * mask).sum(dim=[1, 2]) / area
-
-            best = None
-            for label in scheme.all_garment:
-                region = (parse == label).float()
-                if region.sum() < 0.01 * region.numel():
-                    continue
-                here = (person * region).sum(dim=[1, 2]) / region.sum()
-                distance = float((here - garment_colour).pow(2).sum().sqrt())
-                best = distance if best is None else min(best, distance)
-            if best is not None:
-                colour.append(best)
-                found += 1
-
-        # (label, weight, penalty, available)
-        terms = [
-            ("colour", 2.5, _mean(colour), bool(colour)),
-            ("coverage", 1.5, 1.0 - found / len(samples), True),
-            ("identity@top", 1.0, abs(_mean(identity_y) - 0.15), bool(identity_y)),
-            ("feet@bottom", 1.0, abs(_mean(feet_y) - 0.85), bool(feet_y)),
-        ]
-        weight = sum(w for _, w, _, ok in terms if ok)
-        score = sum(w * v for _, w, v, ok in terms if ok) / max(weight, 1e-6)
-
-        detail = "  ".join(
-            f"{name}={value:.3f}" if ok else f"{name}=n/a"
-            for name, _, value, ok in terms
-        )
-        print(f"  {scheme.name:<6} {detail}   -> score {score:.3f}")
-        results.append((score, scheme))
+            score, detail = _score(samples, scheme)
+            print(f"      {scheme.name:<6} {detail}   -> score {score:.3f}")
+            results.append((score, source_name, field, scheme))
+        print()
 
     if not results:
         raise SystemExit(
-            "\nNo scheme can describe these maps. Check the 'parse' column of the "
+            "No scheme can describe these maps. Check the 'parse' column of the "
             "contact sheet — it should show flat bands of distinct greys, not a "
-            "photo or a binary mask."
+            "photo, a binary mask or noise."
         )
 
     results.sort(key=lambda r: r[0])
-    best_score, best_scheme = results[0]
-    print(f"\n[diagnose] best fit: '{best_scheme.name}'  ({len(samples)} samples)")
+    best_score, best_source, best_field, best_scheme = results[0]
 
-    if len(results) > 1 and results[1][0] - best_score < 0.03:
-        print("[diagnose] !! the two schemes score almost identically, so this is a\n"
-              "              coin flip. Run the normal check under each and compare\n"
-              "              the 'target garment' column against the 'garment' one.")
-
-    print(f"[diagnose] set  data.label_scheme: {best_scheme.name}  in both configs,")
-    print(f"           then rerun:  --label-scheme {best_scheme.name}  (no "
-          f"--diagnose-labels)")
+    print(f"[diagnose] best fit: {best_source}, scheme '{best_scheme.name}' "
+          f"(score {best_score:.3f})")
+    print(f"[diagnose] set in both configs:")
+    print(f"             data.label_scheme: {best_scheme.name}")
+    print(f"             data.parse_source: "
+          f"{'cihp' if best_field == 'cihp' else 'segmentation'}")
+    print(f"           then rerun this script with --label-scheme "
+          f"{best_scheme.name} --parse-source "
+          f"{'cihp' if best_field == 'cihp' else 'segmentation'}")
     print( "           and confirm the contact sheet before training.")
+
+    if best_score > 0.45:
+        print("\n[diagnose] !! even the best combination scores poorly. Likely the\n"
+              "              parse maps are misaligned with the person images, or\n"
+              "              neither folder holds a real label map. The 'contents:'\n"
+              "              lines in the layout report above say what each folder\n"
+              "              actually contains — a multi-channel stack is not a\n"
+              "              label map, whatever argmax makes of it.")
+
+
+def _score(samples, scheme):
+    """Score one (data, scheme) pairing. Lower is better."""
+    identity_y, feet_y, colour, found = [], [], [], 0
+
+    for person, garment, parse, mask in samples:
+        y = _mean_y(parse, scheme.identity)
+        if y is not None:
+            identity_y.append(y)
+        y = _mean_y(parse, scheme.feet)
+        if y is not None:
+            feet_y.append(y)
+
+        area = mask.sum()
+        if area <= 0:
+            continue
+        garment_colour = (garment * mask).sum(dim=[1, 2]) / area
+
+        best = None
+        for label in scheme.all_garment:
+            region = (parse == label).float()
+            if region.sum() < 0.01 * region.numel():
+                continue
+            here = (person * region).sum(dim=[1, 2]) / region.sum()
+            distance = float((here - garment_colour).pow(2).sum().sqrt())
+            best = distance if best is None else min(best, distance)
+        if best is not None:
+            colour.append(best)
+            found += 1
+
+    terms = [
+        ("colour", 2.5, _mean(colour), bool(colour)),
+        ("coverage", 1.5, 1.0 - found / len(samples), True),
+        ("identity@top", 1.0, abs(_mean(identity_y) - 0.15), bool(identity_y)),
+        ("feet@bottom", 1.0, abs(_mean(feet_y) - 0.85), bool(feet_y)),
+    ]
+    weight = sum(w for _, w, _, ok in terms if ok)
+    score = sum(w * v for _, w, v, ok in terms if ok) / max(weight, 1e-6)
+    detail = "  ".join(f"{n}={v:.3f}" if ok else f"{n}=n/a"
+                       for n, _, v, ok in terms)
+    return score, detail
 
 
 def _mean(values, default: float = 0.0) -> float:

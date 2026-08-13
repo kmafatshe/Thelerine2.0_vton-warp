@@ -43,6 +43,7 @@ class TripletVTONDataset(Dataset):
         dilate: int = 5,
         augment: PairedAugment | None = None,
         segmentation_role: str = "auto",
+        parse_source: str = "auto",
         canonicalise: bool = True,
         garment_fill: float = 0.8,
     ):
@@ -55,6 +56,10 @@ class TripletVTONDataset(Dataset):
             label_scheme: which parsing convention the maps follow, "cihp"
                 (= LIP) or "atr". Getting this wrong silently targets the wrong
                 body parts; `check_dataset.py --diagnose-labels` identifies it.
+            parse_source: which folder holds the label map — "cihp",
+                "segmentation", or "auto" (prefer cihp, fall back). A dataset
+                may carry two conditional folders where only one is a label
+                map; `check_dataset.py --diagnose-labels` scores both.
             segmentation_role: how to interpret the `segmentation/` folder.
                 "auto" | "garment_mask" | "person_mask" | "parse" | "ignore"
             canonicalise: crop each garment to its mask and rescale to a
@@ -69,6 +74,7 @@ class TripletVTONDataset(Dataset):
         self.dilate = dilate
         self.augment = augment or PairedAugment(enabled=False)
         self.segmentation_role = segmentation_role
+        self.parse_source = parse_source
         self.canonicalise = canonicalise
         self.garment_fill = garment_fill
 
@@ -122,18 +128,21 @@ class TripletVTONDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _load_parse(self, paths: dict) -> torch.Tensor:
-        """Get a label map, falling back to `segmentation/` if needed."""
-        if paths["cihp"] is not None:
-            return load_label_map(paths["cihp"], self.height, self.width,
-                                  self.scheme.num_classes)
+        """Get the label map from the configured source."""
+        if self.parse_source == "auto":
+            order = ("cihp", "segmentation")
+        else:
+            order = (self.parse_source,)
 
-        if paths["segmentation"] is not None and self.segmentation_role in ("auto", "parse"):
-            return load_label_map(paths["segmentation"], self.height, self.width,
-                                  self.scheme.num_classes)
+        for field in order:
+            if paths.get(field) is not None:
+                return load_label_map(paths[field], self.height, self.width,
+                                      self.scheme.num_classes)
 
         raise FileNotFoundError(
-            "No parse map for sample; cihp/ and segmentation/ both missing or "
-            "unusable. Run scripts/check_dataset.py to see what was matched."
+            f"No parse map for this sample from source {self.parse_source!r}. "
+            "Run scripts/check_dataset.py --diagnose-labels to see which folder "
+            "actually holds the label maps."
         )
 
     def _load_garment_mask(self, paths: dict, garment: torch.Tensor) -> torch.Tensor:
@@ -144,10 +153,15 @@ class TripletVTONDataset(Dataset):
         If the dataset's segmentation folder describes the person instead, we
         fall back to segmenting the product shot from its background.
         """
-        if paths["segmentation"] is not None and self.segmentation_role in (
-            "auto",
-            "garment_mask",
-        ):
+        # If the segmentation folder is what we are reading the parse map from,
+        # it describes the *person*, not the flat garment. Using it as both
+        # would mask the product shot with a body silhouette.
+        is_parse_source = self.parse_source == "segmentation" or (
+            self.parse_source == "auto" and paths.get("cihp") is None
+        )
+
+        if (paths["segmentation"] is not None and not is_parse_source
+                and self.segmentation_role in ("auto", "garment_mask")):
             mask = load_mask(paths["segmentation"], self.height, self.width)
             # A mask covering most of the frame is a person silhouette, not a
             # flat garment; reject it rather than corrupt the warp supervision.

@@ -24,6 +24,10 @@ data:
   segmentation_dir: null
   # auto | garment_mask | person_mask | parse | ignore
   segmentation_role: auto
+  # Which folder holds the label maps: cihp | segmentation | auto.
+  # A dataset can carry two conditional folders where only one is a
+  # label map. Identify it with: check_dataset.py --diagnose-labels
+  parse_source: auto
 
   height: 256
   width: 192

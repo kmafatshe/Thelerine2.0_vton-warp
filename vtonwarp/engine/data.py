@@ -42,7 +42,15 @@ def build_dataloaders(config):
                 f"No samples found under {root}. Run scripts/check_dataset.py to "
                 "see how filenames were matched."
             )
-        if not any(r.cihp or r.segmentation for r in records):
+        source = config.data.get("parse_source", "auto")
+        has_parse = (lambda r: bool(r.cihp or r.segmentation)) if source == "auto" \
+            else (lambda r: bool(getattr(r, source)))
+        usable = [r for r in records if has_parse(r)]
+        if len(usable) < len(records):
+            print(f"[data] dropping {len(records) - len(usable)} sample(s) with no "
+                  f"parse map from source '{source}'")
+            records = usable
+        if not records:
             raise RuntimeError(
                 f"No parse maps matched under {root}, so the clothing-agnostic "
                 "input cannot be built. Run scripts/check_dataset.py for a "
@@ -63,6 +71,7 @@ def build_dataloaders(config):
         label_scheme=config.data.get("label_scheme", "cihp"),
         dilate=config.data.get("erase_dilate", 5),
         segmentation_role=config.data.get("segmentation_role", "auto"),
+        parse_source=config.data.get("parse_source", "auto"),
         canonicalise=config.data.get("canonicalise_garment", True),
         garment_fill=config.data.get("garment_fill", 0.8),
     )

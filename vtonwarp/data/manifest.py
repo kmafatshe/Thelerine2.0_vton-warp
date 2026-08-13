@@ -122,7 +122,58 @@ def describe_layout(root: Path, samples: int = 3) -> str:
             lines.append(f"      {f.relative_to(directory)}"
                          f"   ->  key '{normalise_stem(f.stem)}'")
 
+        if files:
+            lines.append(f"      contents: {_describe_contents(files[0])}")
+
     return "\n".join(lines)
+
+
+def _describe_contents(path: Path) -> str:
+    """Report an array's shape and values, to identify what a folder holds.
+
+    A label map, a one-hot stack, a pose heatmap and a binary mask are all just
+    arrays on disk, and confusing them is silent: argmax over pose heatmaps
+    produces a perfectly well-formed parse map that means nothing. Shape, dtype
+    and the number of distinct values distinguish them at a glance.
+    """
+    try:
+        import numpy as np
+
+        suffix = path.suffix.lower()
+        if suffix == ".npy":
+            array = np.load(path, mmap_mode="r")
+        elif suffix == ".npz":
+            bundle = np.load(path)
+            array = bundle[list(bundle.keys())[0]]
+        else:
+            from PIL import Image
+
+            image = Image.open(path)
+            array = np.array(image)
+            mode = f"mode={image.mode} "
+            unique = np.unique(array)
+            kind = ("binary mask" if unique.size <= 2
+                    else f"{unique.size} distinct values")
+            return (f"{mode}shape={array.shape} dtype={array.dtype} {kind}"
+                    f" range=[{array.min()}, {array.max()}]")
+
+        array = np.asarray(array)
+        unique = np.unique(array)
+        if np.issubdtype(array.dtype, np.integer) and unique.size <= 32:
+            kind = f"integer label map, ids {list(unique[:24])}"
+        elif array.ndim == 3 and min(array.shape) <= 32:
+            channels = min(array.shape)
+            kind = (f"{channels}-channel stack — one-hot/probabilities or pose "
+                    f"heatmaps, NOT a label map")
+        elif unique.size <= 32:
+            kind = f"{unique.size} distinct values {list(unique[:12])}"
+        else:
+            kind = f"continuous, {unique.size} distinct values"
+
+        return (f"shape={array.shape} dtype={array.dtype} {kind}"
+                f" range=[{array.min():.4g}, {array.max():.4g}]")
+    except Exception as error:  # never let introspection break the report
+        return f"(could not read: {type(error).__name__}: {error})"
 
 
 @dataclass
