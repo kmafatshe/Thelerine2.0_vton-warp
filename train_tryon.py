@@ -145,7 +145,8 @@ def main():
     start_step = 0
     if config.train.get("resume", True):
         start_step = maybe_resume(checkpoint_path, "composer", model=composer,
-                                  ema=ema, optimiser=optimiser, scheduler=scheduler)
+                                  ema=ema, optimiser=optimiser, scheduler=scheduler,
+                                  config=config)
         if start_step:
             print(f"[tryon] resumed from step {start_step}")
         if start_step >= config.train.steps:
@@ -234,7 +235,6 @@ def main():
                 models={"composer": composer, "warper": warper},
                 ema={"composer": ema.state_dict()},
                 optimisers={"composer": optimiser},
-                schedulers={"composer": scheduler},
             )
 
     print(f"[tryon] done in {(time.time() - start) / 60:.1f} min -> "

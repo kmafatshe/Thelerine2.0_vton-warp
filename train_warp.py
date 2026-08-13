@@ -145,7 +145,8 @@ def main():
     start_step = 0
     if config.train.get("resume", True):
         start_step = maybe_resume(checkpoint_path, "warper", model=model, ema=ema,
-                                  optimiser=optimiser, scheduler=scheduler)
+                                  optimiser=optimiser, scheduler=scheduler,
+                                  config=config)
         if start_step:
             print(f"[warp] resumed from step {start_step}")
         if start_step >= config.train.steps:
@@ -194,7 +195,7 @@ def main():
             save_checkpoint(
                 checkpoint_path, step=step, config=config,
                 models={"warper": model}, ema={"warper": ema.state_dict()},
-                optimisers={"warper": optimiser}, schedulers={"warper": scheduler},
+                optimisers={"warper": optimiser},
             )
 
     print(f"[warp] done in {(time.time() - start) / 60:.1f} min -> "

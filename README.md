@@ -474,6 +474,8 @@ Stage 1 is comfortable either way; stage 2 is the expensive half. Options:
 | Output blurry / washed out | composer ignoring the warp | raise `loss.alpha`; check `alpha` column is bright inside the garment |
 | Great on train, bad on new garments | leak in the agnostic input | raise `data.erase_dilate`; verify the `agnostic` column in `check_dataset.py` |
 | Face smeared | identity mask wrong | check CIHP labels 1/2/4/13 are present in `check_dataset.py` output |
+| `UnpicklingError: Weights only load failed` | checkpoint written by an older version of this code | it is loaded automatically via a fallback; re-saving uses the strict format |
+| `Refusing to resume ...: the data settings changed` | the checkpoint was fitted to differently-processed inputs | `train.resume=false` (or `FRESH_START = True`), or point `output_dir` somewhere new |
 | Quality collapsed after enabling GAN | discriminator won | raise `train.gan_start_step`, lower `train.lr_d`, keep DiffAugment on |
 
 **Read the sample sheets left to right.** If the `warped` column is wrong,
