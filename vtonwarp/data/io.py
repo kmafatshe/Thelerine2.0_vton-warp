@@ -39,15 +39,40 @@ def _read_array(path: Path) -> np.ndarray:
     return np.array(image.convert("L"))
 
 
-def read_rgb(path: Path) -> torch.Tensor:
-    """RGB image at its native resolution -> (3, H, W) in [-1, 1].
+def read_rgb(path: Path, max_side: int | None = None) -> torch.Tensor:
+    """RGB image -> (3, H, W) in [-1, 1], optionally bounded in size.
 
-    Cropping must happen at native resolution. Resizing a 4000px photo down to
-    256px and *then* cropping to the person throws away the detail before it can
-    be used: the person ends up reconstructed from the handful of pixels that
-    survived, not from the pixels the camera actually captured.
+    Cropping must happen before the image is reduced to the training frame:
+    resizing a 4000px photo to 256px and *then* cropping to the person
+    reconstructs them from the handful of pixels that survived.
+
+    But "before" does not mean "at 12 megapixels". A phone photo is ~4000px
+    while the crop it feeds is 256px, so every intermediate tensor is ~200x
+    larger than anything that reaches the network. Doing the mask and crop work
+    at that size cost 1.15s per sample and exhausted Colab's RAM. `max_side`
+    bounds it: still far above the target frame, so no detail that survives to
+    the output is lost.
+
+    For JPEGs the bound is applied by the decoder itself (`draft`), which
+    decodes directly at 1/2, 1/4 or 1/8 scale rather than decoding in full and
+    throwing most of it away.
     """
-    image = Image.open(path).convert("RGB")
+    image = Image.open(path)
+    if max_side:
+        # Must precede load(); draft() is a no-op once the image is decoded.
+        image.draft("RGB", (max_side, max_side))
+    image = image.convert("RGB")
+
+    # Resize while the data is still 8-bit in PIL. Converting first and
+    # resizing in torch means building a float tensor of the full decoded
+    # image — three megapixels of float32 — and antialiasing it, which cost
+    # 480ms per photo against ~60ms for the same operation done here.
+    if max_side and max(image.size) > max_side:
+        scale = max_side / max(image.size)
+        image = image.resize(
+            (max(1, round(image.size[0] * scale)),
+             max(1, round(image.size[1] * scale))), Image.BILINEAR)
+
     tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
     return tensor * 2.0 - 1.0
 
@@ -119,8 +144,15 @@ def load_image(path: Path, height: int, width: int) -> torch.Tensor:
     return resize_rgb(read_rgb(path), height, width)
 
 
-def read_labels(path: Path, num_classes: int = 20) -> torch.Tensor:
-    """Any parse encoding -> (1, H, W) int64 class ids at native resolution."""
+def read_labels(path: Path, num_classes: int = 20,
+                max_side: int | None = None) -> torch.Tensor:
+    """Any parse encoding -> (1, H, W) int64 class ids.
+
+    `max_side` subsamples with a stride, which is exactly nearest-neighbour
+    downsampling and therefore valid for label ids. Doing it before the tensor
+    conversion matters: a 12-megapixel map becomes a 98 MB int64 tensor
+    otherwise, purely to be resized away moments later.
+    """
     array = _read_array(Path(path))
 
     if array.ndim == 3:
@@ -134,6 +166,10 @@ def read_labels(path: Path, num_classes: int = 20) -> torch.Tensor:
                 "label indices (.npy or indexed PNG) instead."
             )
         array = np.argmax(array, axis=channel_axis)
+
+    if max_side and max(array.shape[:2]) > max_side:
+        step = int(np.ceil(max(array.shape[:2]) / max_side))
+        array = array[::step, ::step]
 
     labels = torch.from_numpy(np.ascontiguousarray(array)).long()
 
@@ -231,7 +267,18 @@ def _largest_component(mask: torch.Tensor) -> torch.Tensor:
     except ImportError:
         return mask
 
-    array = mask[0].numpy()
+    # Connected components on a multi-megapixel mask is seconds of work for a
+    # decision that only needs to know which blob is biggest. A coarse pass is
+    # identical in outcome and orders of magnitude cheaper.
+    coarse = mask
+    if max(mask.shape[-2:]) > 512:
+        scale = 512 / max(mask.shape[-2:])
+        coarse = F.interpolate(
+            mask[None], size=(max(1, round(mask.shape[-2] * scale)),
+                              max(1, round(mask.shape[-1] * scale))),
+            mode="nearest")[0]
+
+    array = coarse[0].numpy()
     labelled, count = ndimage.label(array > 0.5)
     if count <= 1:
         return mask
@@ -241,7 +288,10 @@ def _largest_component(mask: torch.Tensor) -> torch.Tensor:
     # Fill interior holes so a light-coloured print inside a dark garment is
     # not punched out of the mask.
     filled = ndimage.binary_fill_holes(labelled == keep)
-    return torch.from_numpy(filled.astype("float32"))[None]
+    out = torch.from_numpy(filled.astype("float32"))[None]
+    if out.shape[-2:] != mask.shape[-2:]:
+        out = F.interpolate(out[None], size=mask.shape[-2:], mode="nearest")[0]
+    return out
 
 
 def canonicalise_garment(garment: torch.Tensor, mask: torch.Tensor,

@@ -410,6 +410,26 @@ on first use. On this machine that download stalls, so either:
 
 ---
 
+### Preprocessing cost
+
+Everything before augmentation — decoding, masking, cropping, resizing — is
+deterministic, so it runs **once** at startup and the result is cached in
+memory (~2 MB per sample). Repeating it every epoch is what made a run that
+should take ten minutes take hours:
+
+| | per sample |
+|---|---|
+| decode + mask + crop, every access | ~1150 ms |
+| same work, bounded by `max_side` | ~580 ms, **once** |
+| cached access (augmentation only) | ~6 ms |
+
+`data.max_side` (default 1536) caps the resolution that decoding and masking
+work at. It is six times the training frame, so nothing that reaches the output
+is lost — measured garment coverage moves 0.147 → 0.150 and pixels differ by
+0.003 on a [-1, 1] scale — but it keeps intermediate tensors off a 12-megapixel
+scale. A raw phone photo makes a 98 MB int64 parse tensor otherwise, which is
+also what exhausts Colab's RAM.
+
 ## 6. Compute
 
 Measured on this machine (Intel Mac, CPU-only — the installed torch build has no

@@ -96,10 +96,17 @@ def resolve_garment_mask(paths: dict, garment: torch.Tensor, *, height: int,
     return garment_mask_from_rgb(garment)
 
 
-def read_person(person_path, parse_path, *, num_classes: int):
-    """Read a photo and its parse map at native resolution, aligned."""
-    person = read_rgb(person_path)
-    parse = read_labels(parse_path, num_classes)
+def read_person(person_path, parse_path, *, num_classes: int,
+                max_side: int | None = 1536):
+    """Read a photo and its parse map, aligned and bounded in size.
+
+    `max_side` caps the working resolution. It is still six times the training
+    frame, so the crop loses nothing that would reach the output, but it keeps
+    every intermediate tensor two orders of magnitude smaller than a raw phone
+    photo.
+    """
+    person = read_rgb(person_path, max_side=max_side)
+    parse = read_labels(parse_path, num_classes, max_side=max_side)
 
     # Parse maps are often exported at a different resolution to the photo.
     if parse.shape[-2:] != person.shape[-2:]:
@@ -199,7 +206,7 @@ def load_sample(paths: dict, *, height: int, width: int, scheme: LabelScheme,
                 segmentation_role: str = "auto", canonicalise: bool = True,
                 garment_fill: float = 0.8, crop_to_person: bool = True,
                 crop_margin: float = 0.05, crop_mode: str = "garment",
-                crop_context: float = 0.6):
+                crop_context: float = 0.6, max_side: int | None = 1536):
     """The one loading path. Dataset, checker and inference all call this.
 
     Order matters and is not obvious: the crop depends on which garment is being
@@ -211,11 +218,12 @@ def load_sample(paths: dict, *, height: int, width: int, scheme: LabelScheme,
     raw_mask_fraction), all at the target frame size.
     """
     person_native, parse_native = read_person(
-        paths["person"], paths[field], num_classes=scheme.num_classes)
+        paths["person"], paths[field], num_classes=scheme.num_classes,
+        max_side=max_side)
 
     # The garment is masked at its own native resolution, so a garment occupying
     # a small part of a large photo keeps the detail that part contains.
-    garment_native = read_rgb(paths["garment"])
+    garment_native = read_rgb(paths["garment"], max_side=max_side)
     mask_native = resolve_garment_mask(
         paths, garment_native, height=garment_native.shape[-2],
         width=garment_native.shape[-1], parse_source=parse_source,
@@ -253,7 +261,8 @@ def load_sample(paths: dict, *, height: int, width: int, scheme: LabelScheme,
 
 def load_for_diagnosis(paths: dict, field: str, *, height: int, width: int,
                        parse_source: str = "auto", canonicalise: bool = True,
-                       crop_to_person: bool = True, crop_margin: float = 0.05):
+                       crop_to_person: bool = True, crop_margin: float = 0.05,
+                       max_side: int | None = 1536):
     """Load a sample without committing to a label scheme.
 
     Identifying the scheme is the question being asked, so the loading cannot
@@ -262,14 +271,15 @@ def load_for_diagnosis(paths: dict, field: str, *, height: int, width: int,
     convention. Both schemes then score the same pixels, which is what makes the
     comparison fair.
     """
-    person, parse = read_person(paths["person"], paths[field], num_classes=32)
+    person, parse = read_person(paths["person"], paths[field],
+                                num_classes=32, max_side=max_side)
 
     if crop_to_person:
         box = crop_box_for(parse, None, None, mode="person",
                            margin=crop_margin, aspect=width / height)
         person, parse = crop(person, box), crop(parse, box)
 
-    garment = read_rgb(paths["garment"])
+    garment = read_rgb(paths["garment"], max_side=max_side)
     mask = resolve_garment_mask(paths, garment, height=garment.shape[-2],
                                 width=garment.shape[-1],
                                 parse_source=parse_source)

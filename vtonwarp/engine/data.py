@@ -53,6 +53,7 @@ def _drop_flagged(records, config, label: str):
         crop_margin=config.data.get("crop_margin", 0.05),
         crop_mode=config.data.get("crop_mode", "garment"),
         crop_context=config.data.get("crop_context", 0.6),
+        max_side=config.data.get("max_side", 1536),
     )
     bad = {r.key for r in reports if r.flags}
     keep = [r for r in records if r.key not in bad]
@@ -147,6 +148,8 @@ def build_dataloaders(config):
         crop_margin=config.data.get("crop_margin", 0.05),
         crop_mode=config.data.get("crop_mode", "garment"),
         crop_context=config.data.get("crop_context", 0.6),
+        max_side=config.data.get("max_side", 1536),
+        cache=config.data.get("cache_samples", True),
     )
 
     augment = PairedAugment(**dict(config.get("augment", {})))
@@ -159,6 +162,14 @@ def build_dataloaders(config):
     )
 
     workers = config.train.get("num_workers", 0)
+    # Preprocessing is deterministic and identical every epoch, so do it once
+    # rather than inside the training loop. Doing it *before* the DataLoader is
+    # built matters: worker processes are forked from here, so they inherit the
+    # populated cache copy-on-write instead of each rebuilding it. Workers then
+    # only run augmentation, overlapping it with GPU compute.
+    train_set.preload()
+    val_set.preload(log=False)
+
     train_loader = DataLoader(
         train_set,
         batch_size=config.train.batch_size,

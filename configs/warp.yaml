@@ -65,6 +65,14 @@ data:
   # check_dataset.py --audit for the list and the reasons.
   audit_filter: true
 
+  # Cap the resolution that decoding, masking and cropping work at. Still
+  # six times the training frame, so nothing that reaches the output is
+  # lost, but it keeps intermediate tensors off a 12-megapixel scale.
+  max_side: 1536
+  # Preprocess every sample once at startup and keep the result in
+  # memory. Nothing before augmentation depends on the epoch.
+  cache_samples: true
+
   erase_dilate: 5                # px of slack around the erased garment region
   val_fraction: 0.15
 
@@ -112,7 +120,11 @@ train:
   weight_decay: 0.0001
   grad_clip: 1.0
   ema_decay: 0.999
-  num_workers: 0                 # 0 is faster than >0 for tiny datasets on CPU
+  # Workers inherit the preprocessed cache by fork and only run
+  # augmentation, overlapping it with GPU compute. Set 0 on CPU, and
+  # on macOS/Windows, where processes are spawned rather than forked
+  # and each worker would rebuild the cache for itself.
+  num_workers: 2
   # Pick up automatically from <output_dir>/*.pt if it exists. Set false
   # to start clean. Essential on Colab, where sessions get cut off.
   resume: true

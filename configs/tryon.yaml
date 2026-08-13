@@ -61,6 +61,14 @@ data:
   # check_dataset.py --audit for the list and the reasons.
   audit_filter: true
 
+  # Cap the resolution that decoding, masking and cropping work at. Still
+  # six times the training frame, so nothing that reaches the output is
+  # lost, but it keeps intermediate tensors off a 12-megapixel scale.
+  max_side: 1536
+  # Preprocess every sample once at startup and keep the result in
+  # memory. Nothing before augmentation depends on the epoch.
+  cache_samples: true
+
   erase_dilate: 5
   val_fraction: 0.15
 
@@ -107,7 +115,11 @@ train:
   weight_decay: 0.0001
   grad_clip: 1.0
   ema_decay: 0.999
-  num_workers: 0
+  # Workers inherit the preprocessed cache by fork and only run
+  # augmentation, overlapping it with GPU compute. Set 0 on CPU, and
+  # on macOS/Windows, where processes are spawned rather than forked
+  # and each worker would rebuild the cache for itself.
+  num_workers: 2
   gan_start_step: 6000
   diffaug: color,translation,cutout
   finetune_warper_after: 0       # e.g. 10000 to jointly finetune near the end

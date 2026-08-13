@@ -44,6 +44,8 @@ class TripletVTONDataset(Dataset):
         crop_margin: float = 0.05,
         crop_mode: str = "garment",
         crop_context: float = 0.6,
+        max_side: int | None = 1536,
+        cache: bool = True,
     ):
         """
         Args:
@@ -83,24 +85,55 @@ class TripletVTONDataset(Dataset):
         self.crop_margin = crop_margin
         self.crop_mode = crop_mode
         self.crop_context = crop_context
+        self.max_side = max_side
+        self._cache: dict[int, tuple] = {} if cache else None
 
     def __len__(self) -> int:
         return len(self.records)
 
     # ------------------------------------------------------------------
 
-    def __getitem__(self, index: int) -> dict:
+    def _prepare(self, index: int) -> tuple:
+        """Everything before augmentation: deterministic, so do it once.
+
+        Decoding, masking, cropping and resizing cost ~1s per sample on phone
+        photos, and none of it depends on the epoch — repeating it every access
+        left the GPU idle and, with several megapixel tensors per worker, ran
+        Colab out of memory. With a few dozen samples the results fit in memory
+        comfortably (~2 MB each), so they are computed once and reused.
+        """
+        if self._cache is not None and index in self._cache:
+            return self._cache[index]
+
         record = self.records[index]
         paths = record.resolve(self.root)
-
-        person, parse, garment, garment_mask, labels, confident, _ = load_sample(
+        prepared = load_sample(
             paths, height=self.height, width=self.width, scheme=self.scheme,
             field=self._parse_field(paths), parse_source=self.parse_source,
             segmentation_role=self.segmentation_role,
             canonicalise=self.canonicalise, garment_fill=self.garment_fill,
             crop_to_person=self.crop_to_person, crop_margin=self.crop_margin,
             crop_mode=self.crop_mode, crop_context=self.crop_context,
-        )
+            max_side=self.max_side,
+        )[:6]
+
+        if self._cache is not None:
+            self._cache[index] = prepared
+        return prepared
+
+    def preload(self, log: bool = True) -> "TripletVTONDataset":
+        """Fill the cache up front, so step timings are not skewed by loading."""
+        if self._cache is None:
+            return self
+        for index in range(len(self)):
+            self._prepare(index)
+        if log:
+            print(f"[data] preprocessed and cached {len(self)} samples")
+        return self
+
+    def __getitem__(self, index: int) -> dict:
+        record = self.records[index]
+        person, parse, garment, garment_mask, labels, confident = self._prepare(index)
 
         if self.garment_type != "auto":
             labels, confident = self.scheme.garment_labels(self.garment_type), True
