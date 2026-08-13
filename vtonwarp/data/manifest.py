@@ -262,7 +262,11 @@ def index_folder(folder: Path, exts=ANY_EXTS) -> dict:
         subject = rel.parts[0] if len(rel.parts) > 1 else ""
 
         key = normalise_stem(path.stem)
-        seen.setdefault(key, []).append(path)
+        # Keyed by subject as well: the same filename under personA/ and
+        # personB/ is not a collision, because lookup is subject-scoped and
+        # each resolves to its own file. Only a clash *within* one subject
+        # means a file can never be matched.
+        seen.setdefault((subject, key), []).append(path)
         exact.setdefault((subject, key), path)
         exact.setdefault(("", key), path)
 
@@ -272,6 +276,7 @@ def index_folder(folder: Path, exts=ANY_EXTS) -> dict:
             numeric.setdefault(("", weak), path)
 
     collisions = {key: paths for key, paths in seen.items() if len(paths) > 1}
+
     return {"exact": exact, "numeric": numeric, "collisions": collisions}
 
 
@@ -329,9 +334,10 @@ def build_manifest(
             print(f"[manifest] !! {len(folder['collisions'])} key collision(s) in "
                   f"{name}/: different files reducing to the same id, so only one "
                   f"of each can ever be matched")
-            for key, paths in list(folder["collisions"].items())[:5]:
+            for (subject, key), paths in list(folder["collisions"].items())[:6]:
+                where = f"{subject}/" if subject else ""
                 names = ", ".join(p.name for p in paths[:4])
-                print(f"[manifest]    '{key}': {names}"
+                print(f"[manifest]    {where}'{key}': {names}"
                       + (" ..." if len(paths) > 4 else ""))
 
     records: list[TripletRecord] = []
