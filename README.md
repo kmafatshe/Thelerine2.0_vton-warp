@@ -175,8 +175,18 @@ Everything below buys quality without needing more images.
 Files are matched across folders by a **normalised stem** — the filename with
 role tokens (`_person`, `_garment`, `_cihp`, `_seg`, `_dress`, …) stripped, so
 `0001_person.jpg` pairs with `0001_garment_dress.png` automatically. Subject
-subfolders are matched first, then globally. See
-[`vtonwarp/data/manifest.py`](vtonwarp/data/manifest.py).
+subfolders are matched first, then globally, and only if no exact stem matches
+does it fall back to a bare numeric id (announced in the log, because that form
+is ambiguous). See [`vtonwarp/data/manifest.py`](vtonwarp/data/manifest.py).
+
+**Key collisions are reported.** Two files reducing to the same id means one of
+them wins every lookup and the other's partner is silently mispaired — which is
+what `GARMENT_MISMATCH` in the audit then detects. Phone filenames are the usual
+cause: `IMG-20211010-WA0001` and `-WA0002` must not both reduce to `20211010`.
+
+`manifest.json` caches the pairing decisions and records the version of the
+rules that produced it; a manifest written by older rules is rebuilt rather than
+reused.
 
 `personA` and `personB` are treated as two subjects. Every person is **self-paired**
 with the garment they are already wearing, which is what provides pixel-perfect

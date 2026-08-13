@@ -75,8 +75,12 @@ def build_dataloaders(config):
     # `manifest: null` in YAML means "use the default", so `or` not `get`.
     manifest_path = Path(config.data.get("manifest") or root / "manifest.json")
 
+    cached = None
     if manifest_path.exists() and not config.data.get("rebuild_manifest", False):
-        train_records, val_records = read_manifest(manifest_path)
+        cached = read_manifest(manifest_path)
+
+    if cached is not None:
+        train_records, val_records = cached
     else:
         # Folder names are auto-detected unless the config names them, so a
         # dataset using `cond/` and `seg/` trains without any edits.

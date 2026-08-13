@@ -49,6 +49,11 @@ ROLE_TOKENS = (
 
 _SPLIT = re.compile(r"[^a-z0-9]+")
 
+# Bumped whenever the matching rules change, so a manifest written by older
+# rules is rebuilt rather than silently reused. Version 1 collapsed phone
+# filenames to their date, pairing many people with one garment.
+MANIFEST_VERSION = 2
+
 # Folder names, in preference order, for each of the four roles. Hand-built
 # datasets rename these constantly, so we resolve them rather than demand them.
 ROLE_FOLDERS = {
@@ -199,39 +204,90 @@ def normalise_stem(stem: str) -> str:
     """Reduce a filename stem to a stable identity token.
 
     `0001_person` -> `0001`,  `img_0007_garment_dress` -> `0007`.
-    If stripping removes everything we fall back to the original stem.
+
+    Every non-role token is kept. An earlier version collapsed the stem to its
+    single all-digit token when there was exactly one, which looked tidy and was
+    badly wrong for phone filenames: `IMG-20211010-WA0001`, `-WA0002` and
+    `-WA0017` all reduced to `20211010`, because `wa0001` is not purely numeric
+    and was discarded. Every photo taken on one date then shared a key, so they
+    all matched whichever garment happened to be indexed first — a silent
+    mispairing that trains the warper to deform one garment into another's
+    silhouette.
     """
     parts = [p for p in _SPLIT.split(stem.lower()) if p]
     kept = [p for p in parts if p not in ROLE_TOKENS]
     if not kept:
         kept = parts
-    # Prefer the numeric id if there is exactly one — it is the most reliable
-    # cross-folder anchor.
-    digits = [p for p in kept if p.isdigit()]
-    if len(digits) == 1:
-        return digits[0].lstrip("0") or "0"
     return "_".join(kept)
 
 
-def index_folder(folder: Path, exts=ANY_EXTS) -> dict[tuple[str, str], Path]:
-    """Map (subject, normalised_stem) -> path for every file under `folder`.
+def numeric_key(stem: str) -> str | None:
+    """The stem's single numeric id, if it has exactly one.
 
-    Also registers a ("", stem) fallback so that a flat garments folder can
-    still serve subject-partitioned person images.
+    Used only as a fallback, so that `0001_person` still pairs with
+    `0007_garment_dress` when the full stems differ. Ambiguous by nature, which
+    is why it is never tried before an exact match.
     """
-    index: dict[tuple[str, str], Path] = {}
-    if not folder.exists():
-        return index
+    parts = [p for p in _SPLIT.split(stem.lower()) if p]
+    kept = [p for p in parts if p not in ROLE_TOKENS] or parts
+    digits = [p for p in kept if p.isdigit()]
+    if len(digits) == 1:
+        return digits[0].lstrip("0") or "0"
+    return None
 
+
+def index_folder(folder: Path, exts=ANY_EXTS) -> dict:
+    """Index a folder for cross-folder matching.
+
+    Returns a dict with:
+      exact     (subject, normalised_stem) -> path, plus a ("", stem) fallback
+                so a flat garments folder can serve subject-partitioned people
+      numeric   the same, keyed by the weaker numeric-id form
+      collisions  key -> [paths] for any key claimed by more than one file
+
+    Collisions are the thing to watch: two files reducing to one key means one
+    of them silently wins every lookup.
+    """
+    exact: dict[tuple[str, str], Path] = {}
+    numeric: dict[tuple[str, str], Path] = {}
+    collisions: dict[str, list[Path]] = {}
+    if not folder.exists():
+        return {"exact": exact, "numeric": numeric, "collisions": collisions}
+
+    seen: dict[str, list[Path]] = {}
     for path in sorted(folder.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in exts:
             continue
         rel = path.relative_to(folder)
         subject = rel.parts[0] if len(rel.parts) > 1 else ""
+
         key = normalise_stem(path.stem)
-        index.setdefault((subject, key), path)
-        index.setdefault(("", key), path)
-    return index
+        seen.setdefault(key, []).append(path)
+        exact.setdefault((subject, key), path)
+        exact.setdefault(("", key), path)
+
+        weak = numeric_key(path.stem)
+        if weak:
+            numeric.setdefault((subject, weak), path)
+            numeric.setdefault(("", weak), path)
+
+    collisions = {key: paths for key, paths in seen.items() if len(paths) > 1}
+    return {"exact": exact, "numeric": numeric, "collisions": collisions}
+
+
+def _lookup(index: dict, subject: str, stem: str):
+    """Exact match first, then the weaker numeric-id form."""
+    key = normalise_stem(stem)
+    for candidate in ((subject, key), ("", key)):
+        if candidate in index["exact"]:
+            return index["exact"][candidate], False
+
+    weak = numeric_key(stem)
+    if weak:
+        for candidate in ((subject, weak), ("", weak)):
+            if candidate in index["numeric"]:
+                return index["numeric"][candidate], True
+    return None, False
 
 
 def build_manifest(
@@ -259,31 +315,46 @@ def build_manifest(
         raise FileNotFoundError(f"person folder not found: {people}")
 
     index = lambda name, exts: (  # noqa: E731
-        index_folder(root / name, exts) if name else {}
+        index_folder(root / name, exts) if name
+        else {"exact": {}, "numeric": {}, "collisions": {}}
     )
     garments = index(garment_dir, IMAGE_EXTS)
     cihps = index(cihp_dir, ANY_EXTS)
     segs = index(segmentation_dir, ANY_EXTS)
+    people = index_folder(root / person_dir, IMAGE_EXTS)
+
+    for name, folder in (("person", people), ("garments", garments),
+                         ("cihp", cihps), ("segmentation", segs)):
+        if folder["collisions"]:
+            print(f"[manifest] !! {len(folder['collisions'])} key collision(s) in "
+                  f"{name}/: different files reducing to the same id, so only one "
+                  f"of each can ever be matched")
+            for key, paths in list(folder["collisions"].items())[:5]:
+                names = ", ".join(p.name for p in paths[:4])
+                print(f"[manifest]    '{key}': {names}"
+                      + (" ..." if len(paths) > 4 else ""))
 
     records: list[TripletRecord] = []
     skipped: list[str] = []
+    weak_matches = 0
 
-    for path in sorted(people.rglob("*")):
+    for path in sorted((root / person_dir).rglob("*")):
         if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
             continue
 
-        rel = path.relative_to(people)
+        rel = path.relative_to(root / person_dir)
         subject = rel.parts[0] if len(rel.parts) > 1 else ""
         key = normalise_stem(path.stem)
 
-        garment = garments.get((subject, key)) or garments.get(("", key))
+        garment, weak = _lookup(garments, subject, path.stem)
         if garment is None:
             # A person with no garment cannot supervise the warper.
             skipped.append(f"{rel} (no garment for key '{key}')")
             continue
+        weak_matches += int(weak)
 
-        cihp = cihps.get((subject, key)) or cihps.get(("", key))
-        seg = segs.get((subject, key)) or segs.get(("", key))
+        cihp, _ = _lookup(cihps, subject, path.stem)
+        seg, _ = _lookup(segs, subject, path.stem)
 
         records.append(
             TripletRecord(
@@ -295,6 +366,10 @@ def build_manifest(
                 segmentation=str(seg.relative_to(root)) if seg else None,
             )
         )
+
+    if weak_matches:
+        print(f"[manifest] {weak_matches} sample(s) paired by numeric id rather "
+              f"than an exact stem match — check those pairs in --audit")
 
     if skipped:
         print(f"[manifest] skipped {len(skipped)} unmatched person image(s):")
@@ -320,6 +395,7 @@ def split_records(
 
 def write_manifest(path: Path, train, val) -> None:
     payload = {
+        "version": MANIFEST_VERSION,
         "train": [asdict(r) for r in train],
         "val": [asdict(r) for r in val],
     }
@@ -327,7 +403,18 @@ def write_manifest(path: Path, train, val) -> None:
     Path(path).write_text(json.dumps(payload, indent=2))
 
 
-def read_manifest(path: Path) -> tuple[list[TripletRecord], list[TripletRecord]]:
+def read_manifest(path: Path):
+    """Load a manifest, or None if it predates the current matching rules.
+
+    Returning None rather than the stale records matters: a manifest is a cache
+    of pairing decisions, and reusing one written under rules that mispaired
+    files would quietly undo the fix.
+    """
     payload = json.loads(Path(path).read_text())
+    if payload.get("version", 1) != MANIFEST_VERSION:
+        print(f"[manifest] {path} was written by older matching rules "
+              f"(v{payload.get('version', 1)} < v{MANIFEST_VERSION}); rebuilding")
+        return None
+
     to_records = lambda rows: [TripletRecord(**row) for row in rows]  # noqa: E731
     return to_records(payload["train"]), to_records(payload["val"])
