@@ -45,7 +45,14 @@ data:
   # lever available on such data. check_dataset.py --audit reports the
   # resulting garment coverage.
   crop_to_person: true
-  crop_margin: 0.15
+  # garment = frame the garment plus context, extended to keep the head.
+  # person  = frame the whole body. On full-body photos that leaves an
+  #           upper garment covering ~6% of the frame, because growing a
+  #           narrow standing figure to the frame's aspect adds mostly
+  #           background. check_dataset.py --audit reports the coverage.
+  crop_mode: garment
+  crop_context: 0.6
+  crop_margin: 0.05
 
   canonicalise_garment: true
   garment_fill: 0.8

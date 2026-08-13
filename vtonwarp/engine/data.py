@@ -50,7 +50,9 @@ def _drop_flagged(records, config, label: str):
         canonicalise=config.data.get("canonicalise_garment", True),
         garment_fill=config.data.get("garment_fill", 0.8),
         crop_to_person=config.data.get("crop_to_person", True),
-        crop_margin=config.data.get("crop_margin", 0.15),
+        crop_margin=config.data.get("crop_margin", 0.05),
+        crop_mode=config.data.get("crop_mode", "garment"),
+        crop_context=config.data.get("crop_context", 0.6),
     )
     bad = {r.key for r in reports if r.flags}
     keep = [r for r in records if r.key not in bad]
@@ -142,7 +144,9 @@ def build_dataloaders(config):
         canonicalise=config.data.get("canonicalise_garment", True),
         garment_fill=config.data.get("garment_fill", 0.8),
         crop_to_person=config.data.get("crop_to_person", True),
-        crop_margin=config.data.get("crop_margin", 0.15),
+        crop_margin=config.data.get("crop_margin", 0.05),
+        crop_mode=config.data.get("crop_mode", "garment"),
+        crop_context=config.data.get("crop_context", 0.6),
     )
 
     augment = PairedAugment(**dict(config.get("augment", {})))

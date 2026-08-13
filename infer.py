@@ -40,7 +40,7 @@ from vtonwarp.data.io import (
     load_mask,
     read_rgb,
 )
-from vtonwarp.data.quality import load_person
+from vtonwarp.data.quality import load_sample
 from vtonwarp.data.labels import get_scheme, role_from_filename
 from vtonwarp.data.manifest import read_manifest
 from vtonwarp.engine.checkpoint import load_checkpoint
@@ -92,7 +92,9 @@ class TryOnPipeline:
         self.canonicalise = config.data.get("canonicalise_garment", True)
         self.garment_fill = config.data.get("garment_fill", 0.8)
         self.crop_to_person = config.data.get("crop_to_person", True)
-        self.crop_margin = config.data.get("crop_margin", 0.15)
+        self.crop_margin = config.data.get("crop_margin", 0.05)
+        self.crop_mode = config.data.get("crop_mode", "garment")
+        self.crop_context = config.data.get("crop_context", 0.6)
 
         warp_config = Config(load_checkpoint(config.train.warp_checkpoint,
                                              map_location="cpu")["config"])
@@ -122,45 +124,32 @@ class TryOnPipeline:
 
     # ------------------------------------------------------------------
 
-    def condition_from(self, person_path, parse_path, garment=None, mask=None,
-                       hint=None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build the agnostic condition for a person.
+    def condition_from(self, person_path, parse_path, garment_path,
+                       mask_path=None):
+        """Build everything one try-on needs, through the shared loading path.
 
-        The garment is optional but recommended: with `garment_type: auto` it is
-        what decides *which* region of the person to erase. Omitting it on a
-        mixed dataset means erasing the wrong garment — you would be putting a
-        dress onto a body whose trousers were removed.
+        The garment is not optional: with `garment_type: auto` it decides which
+        region of the person to erase *and* where to crop. Passing it separately
+        from the person is what let the two disagree.
         """
-        person, parse = load_person(
-            Path(person_path), Path(parse_path),
-            height=self.height, width=self.width,
-            num_classes=self.scheme.num_classes,
-            crop_to_person=self.crop_to_person, margin=self.crop_margin,
-        )
+        paths = {"person": Path(person_path), "cihp": Path(parse_path),
+                 "garment": Path(garment_path),
+                 "segmentation": Path(mask_path) if mask_path else None}
 
-        if self.garment_type == "auto" and garment is not None:
-            labels, _ = select_garment_labels(
-                self.scheme, parse, person, garment[0], mask[0], hint=hint,
-            )
-        elif self.garment_type == "auto":
-            labels = self.scheme.garment_labels("upper")
-        else:
+        person, parse, garment, mask, labels, _, _ = load_sample(
+            paths, height=self.height, width=self.width, scheme=self.scheme,
+            field="cihp", parse_source="cihp",
+            segmentation_role="garment_mask" if mask_path else "ignore",
+            canonicalise=self.canonicalise, garment_fill=self.garment_fill,
+            crop_to_person=self.crop_to_person, crop_margin=self.crop_margin,
+            crop_mode=self.crop_mode, crop_context=self.crop_context,
+        )
+        if self.garment_type != "auto":
             labels = self.scheme.garment_labels(self.garment_type)
 
         sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
-        return stack_condition(sample)[None], sample["agnostic"][None]
-
-    def garment_from(self, garment_path, mask_path=None):
-        garment = read_rgb(Path(garment_path))
-        if mask_path:
-            mask = load_mask(Path(mask_path), *garment.shape[-2:])
-        else:
-            mask = garment_mask_from_rgb(garment)
-        garment, mask = canonicalise_garment(
-            garment, mask, self.height, self.width,
-            fill=self.garment_fill if self.canonicalise else 1.0,
-        )
-        return garment[None], mask[None]
+        return (stack_condition(sample)[None], sample["agnostic"][None],
+                garment[None], mask[None])
 
     @torch.no_grad()
     def __call__(self, condition, garment, garment_mask) -> dict:
@@ -193,11 +182,8 @@ def main():
     if not (args.person and args.parse and args.garment):
         raise SystemExit("--person, --parse and --garment are required without --grid")
 
-    garment, mask = pipeline.garment_from(args.garment, args.garment_mask)
-    condition, agnostic = pipeline.condition_from(
-        args.person, args.parse, garment, mask,
-        hint=role_from_filename(Path(args.garment).stem),
-    )
+    condition, agnostic, garment, mask = pipeline.condition_from(
+        args.person, args.parse, args.garment, args.garment_mask)
     result = pipeline(condition, garment, mask)
 
     save_image(result["output"][0], args.out)
@@ -225,19 +211,13 @@ def run_grid(pipeline: TryOnPipeline, args) -> None:
 
     columns: dict[str, list[torch.Tensor]] = {}
     for garment_record in records:
-        paths = garment_record.resolve(root)
-        garment, mask = pipeline.garment_from(paths["garment"])
+        garment_paths = garment_record.resolve(root)
         column = []
         for person_record in records:
             person_paths = person_record.resolve(root)
             parse_path = person_paths["cihp"] or person_paths["segmentation"]
-            if parse_path is None:
-                print(f"[infer] skipping {person_record.key}: no parse map")
-                continue
-            condition, _ = pipeline.condition_from(
-                person_paths["person"], parse_path, garment, mask,
-                hint=role_from_filename(Path(paths["garment"]).stem),
-            )
+            condition, _, garment, mask = pipeline.condition_from(
+                person_paths["person"], parse_path, garment_paths["garment"])
             result = pipeline(condition, garment, mask)
             column.append(result["output"][0].cpu())
         columns[f"garment {garment_record.key}"] = torch.stack(column)

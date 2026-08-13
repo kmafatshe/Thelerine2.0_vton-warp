@@ -18,11 +18,10 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 
-from .agnostic import build_agnostic, select_garment_labels, stack_condition
+from .agnostic import build_agnostic, stack_condition
 from .augment import PairedAugment
-from .io import canonicalise_garment, read_rgb, resize_labels, resize_rgb
-from .labels import get_scheme, role_from_filename
-from .quality import load_person, resolve_garment_mask
+from .labels import get_scheme
+from .quality import load_sample, parse_field_for
 from .manifest import TripletRecord
 
 
@@ -42,7 +41,9 @@ class TripletVTONDataset(Dataset):
         canonicalise: bool = True,
         garment_fill: float = 0.8,
         crop_to_person: bool = True,
-        crop_margin: float = 0.15,
+        crop_margin: float = 0.05,
+        crop_mode: str = "garment",
+        crop_context: float = 0.6,
     ):
         """
         Args:
@@ -80,6 +81,8 @@ class TripletVTONDataset(Dataset):
         self.garment_fill = garment_fill
         self.crop_to_person = crop_to_person
         self.crop_margin = crop_margin
+        self.crop_mode = crop_mode
+        self.crop_context = crop_context
 
     def __len__(self) -> int:
         return len(self.records)
@@ -90,39 +93,21 @@ class TripletVTONDataset(Dataset):
         record = self.records[index]
         paths = record.resolve(self.root)
 
-        person, parse = load_person(
-            paths["person"], self._parse_path(paths),
-            height=self.height, width=self.width,
-            num_classes=self.scheme.num_classes,
-            crop_to_person=self.crop_to_person, margin=self.crop_margin,
+        person, parse, garment, garment_mask, labels, confident, _ = load_sample(
+            paths, height=self.height, width=self.width, scheme=self.scheme,
+            field=self._parse_field(paths), parse_source=self.parse_source,
+            segmentation_role=self.segmentation_role,
+            canonicalise=self.canonicalise, garment_fill=self.garment_fill,
+            crop_to_person=self.crop_to_person, crop_margin=self.crop_margin,
+            crop_mode=self.crop_mode, crop_context=self.crop_context,
         )
 
-        # The garment is masked and cropped at its own native resolution, so a
-        # garment occupying a small part of a large photo keeps its detail.
-        garment = read_rgb(paths["garment"])
-        garment_mask = self._load_garment_mask(paths, garment)
-
-        if self.canonicalise:
-            garment, garment_mask = canonicalise_garment(
-                garment, garment_mask, self.height, self.width,
-                fill=self.garment_fill,
-            )
-        else:
-            garment = resize_rgb(garment, self.height, self.width)
-            garment_mask = resize_labels(
-                garment_mask.long(), self.height, self.width).float()
+        if self.garment_type != "auto":
+            labels, confident = self.scheme.garment_labels(self.garment_type), True
 
         person, parse, garment, garment_mask = self.augment(
             person, parse, garment, garment_mask
         )
-
-        if self.garment_type == "auto":
-            labels, confident = select_garment_labels(
-                self.scheme, parse, person, garment, garment_mask,
-                hint=role_from_filename(Path(paths["garment"]).stem),
-            )
-        else:
-            labels, confident = self.scheme.garment_labels(self.garment_type), True
 
         sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
         sample.update(
@@ -142,28 +127,16 @@ class TripletVTONDataset(Dataset):
 
     # ------------------------------------------------------------------
 
-    def _parse_path(self, paths: dict):
-        """Path to the label map from the configured source."""
-        order = ("cihp", "segmentation") if self.parse_source == "auto" \
-            else (self.parse_source,)
-
-        for field in order:
-            if paths.get(field) is not None:
-                return paths[field]
-
-        raise FileNotFoundError(
-            f"No parse map for this sample from source {self.parse_source!r}. "
-            "Run scripts/check_dataset.py --diagnose-labels to see which folder "
-            "actually holds the label maps."
-        )
-
-    def _load_garment_mask(self, paths: dict, garment: torch.Tensor) -> torch.Tensor:
-        """Mask of the flat garment. Shared with the checker via `quality`."""
-        return resolve_garment_mask(
-            paths, garment, height=garment.shape[-2], width=garment.shape[-1],
-            parse_source=self.parse_source,
-            segmentation_role=self.segmentation_role,
-        )
+    def _parse_field(self, paths: dict) -> str:
+        """Which record field holds this sample's label map."""
+        field = parse_field_for(paths, self.parse_source)
+        if paths.get(field) is None:
+            raise FileNotFoundError(
+                f"No parse map for this sample from source {self.parse_source!r}. "
+                "Run scripts/check_dataset.py --diagnose-labels to see which "
+                "folder holds the label maps."
+            )
+        return field
 
 
 def collate(batch: list[dict]) -> dict:

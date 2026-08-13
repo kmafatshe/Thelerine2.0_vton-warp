@@ -252,9 +252,23 @@ bounding box **at native resolution**, then resizes once.
 This matters enormously when the source images are scenes rather than studio
 shots. If the person occupies 10% of a landscape photo, the garment region is
 ~3% of the frame — try-on happening on a postage stamp, with the network
-spending its capacity on grass and sky. Measured on synthetic data framed that
-way, cropping moves the median garment coverage from **1.9% to 16.9%**, and
-samples that were previously unusable (`NO_GARMENT`) become usable.
+spending its capacity on grass and sky.
+
+`crop_mode` decides what to frame, and the right answer depends on the subject's
+shape. Measured on a tall standing figure (aspect ~0.22) in a wide photo:
+
+| mode | median garment coverage |
+|---|---|
+| no crop | 0.044 |
+| `person` — whole body | 0.082 |
+| `garment` — garment plus context, extended to keep the head | **0.147** |
+
+`person` sounds right and measures badly on full-body shots: growing a narrow
+standing figure to the frame's 0.75 aspect adds nearly three times the width in
+pure background. `garment` frames the region being edited — the same half-body
+framing VITON-style datasets have by construction. For compact, already
+half-body subjects `person` can win; `check_dataset.py --audit --crop-mode ...`
+compares them on your data.
 
 Cropping at native resolution is the point: downscaling a 4000px photo to 256px
 and *then* cropping reconstructs the person from the few pixels that survived.

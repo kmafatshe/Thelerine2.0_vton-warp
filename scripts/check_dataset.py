@@ -43,7 +43,11 @@ from vtonwarp.data.labels import (
 )
 from vtonwarp.data.manifest import build_manifest, describe_layout, resolve_layout
 from vtonwarp.data.quality import audit as quality_audit
-from vtonwarp.data.quality import load_person
+from vtonwarp.data.quality import (
+    load_for_diagnosis,
+    load_sample,
+    parse_field_for,
+)
 from vtonwarp.data.quality import resolve_garment_mask
 from vtonwarp.engine.visualize import contact_sheet
 
@@ -64,7 +68,10 @@ def parse_args():
                         help="score each parsing convention against the data")
     parser.add_argument("--no-crop", action="store_true",
                         help="do not crop photos to the person")
-    parser.add_argument("--crop-margin", type=float, default=0.15)
+    parser.add_argument("--crop-margin", type=float, default=0.05)
+    parser.add_argument("--crop-mode", default="garment",
+                        choices=("garment", "person"))
+    parser.add_argument("--crop-context", type=float, default=0.6)
     parser.add_argument("--audit", action="store_true",
                         help="per-sample quality report over the whole dataset")
     parser.add_argument("--parse-source", default="auto",
@@ -155,36 +162,22 @@ def main():
             skipped += 1
             continue
 
-        person, parse = load_person(
-            paths["person"], source, height=args.height, width=args.width,
-            num_classes=scheme.num_classes,
-            crop_to_person=not args.no_crop, margin=args.crop_margin,
+        parse_field = parse_field_for(paths, args.parse_source)
+        person, parse, garment, mask, labels, _, raw_mask_fraction = load_sample(
+            paths, height=args.height, width=args.width, scheme=scheme,
+            field=parse_field, parse_source=args.parse_source,
+            canonicalise=not args.no_canonicalise,
+            crop_to_person=not args.no_crop, crop_margin=args.crop_margin,
+            crop_mode=args.crop_mode, crop_context=args.crop_context,
         )
-        garment = read_rgb(paths["garment"])
         label_counter.update(parse.unique().tolist())
-
-        parse_field = ('segmentation'
-                       if args.parse_source == 'segmentation'
-                       or (args.parse_source == 'auto'
-                           and paths['cihp'] is None)
-                       else 'cihp')
-        mask = _garment_mask(paths, garment, args, parse_field=parse_field)
-        raw_mask_fraction = float(mask.mean())
-        garment, mask = canonicalise_garment(
-            garment, mask, args.height, args.width,
-            fill=1.0 if args.no_canonicalise else 0.8)
-
-        if args.garment_type == "auto":
-            labels, _ = select_garment_labels(
-                scheme, parse, person, garment, mask,
-                hint=role_from_filename(Path(paths["garment"]).stem),
-            )
-        else:
+        if args.garment_type != "auto":
             labels = scheme.garment_labels(args.garment_type)
         chosen[tuple(scheme.labels[i] for i in labels)] += 1
 
         sample = build_agnostic(person, parse, scheme, labels)
         coverage.append(float(sample["garment_mask"].mean()))
+        mask_fractions.append(raw_mask_fraction)
 
         if paths["segmentation"] is not None and parse_field != "segmentation":
             seg_means.append(float(load_mask(paths["segmentation"],
@@ -199,7 +192,6 @@ def main():
         columns["shape"].append(sample["shape"])
         columns["garment"].append(garment)
         columns["garment mask"].append(mask)
-        mask_fractions.append(raw_mask_fraction)
         columns["target garment"].append(sample["target_garment"])
 
     if skipped:
@@ -264,6 +256,7 @@ def audit(records, root, args, scheme, max_listed: int = 40):
         records, root, height=args.height, width=args.width, scheme=scheme,
         parse_source=args.parse_source, canonicalise=not args.no_canonicalise,
         crop_to_person=not args.no_crop, crop_margin=args.crop_margin,
+        crop_mode=args.crop_mode, crop_context=args.crop_context,
     )
     flagged = [r for r in reports if r.flags]
 
@@ -351,19 +344,22 @@ def diagnose_labels(records, root, args, limit: int = 12):
         samples, max_label = [], 0
         for record in usable:
             paths = record.resolve(root)
-            # Load with a generous class count so nothing is clamped away
-            # before we know which scheme applies.
-            person, parse = load_person(
-                paths["person"], paths[field], height=args.height,
-                width=args.width, num_classes=32,
-                crop_to_person=not args.no_crop, margin=args.crop_margin,
+            person, parse, garment, mask = load_for_diagnosis(
+                paths, field, height=args.height, width=args.width,
+                # `field` is the candidate being scored, so pass it as the parse
+                # source: when scoring the segmentation folder as the parse map,
+                # it describes the person and must not also mask the garment.
+                parse_source=field,
+                canonicalise=not args.no_canonicalise,
+                # Deliberately uncropped. The crop is derived from the parse
+                # silhouette, so cropping with a *wrong* parse changes the
+                # framing that the scoring then judges — a confound that pushed
+                # a known-correct dataset from 0.125 to 0.503. Scheme identity
+                # is a question about labels, not framing.
+                crop_to_person=False,
             )
-            garment = read_rgb(paths["garment"])
             max_label = max(max_label, int(parse.max()))
 
-            mask = _garment_mask(paths, garment, args, parse_field=field)
-            garment, mask = canonicalise_garment(garment, mask, args.height,
-                                                 args.width)
             samples.append((person, garment, parse, mask))
 
         print(f"  {source_name}: {len(samples)} samples, class ids 0..{max_label}")

@@ -96,35 +96,72 @@ def resolve_garment_mask(paths: dict, garment: torch.Tensor, *, height: int,
     return garment_mask_from_rgb(garment)
 
 
-def load_person(person_path, parse_path, *, height: int, width: int,
-                num_classes: int, crop_to_person: bool = True,
-                margin: float = 0.15):
-    """Load a person and their parse map, optionally cropped to the person.
-
-    Your photos are scenes: the person can occupy 3% of the frame, so the
-    garment region the warper has to hit is a few thousand pixels and the try-on
-    happens on a postage stamp. Cropping to the person's bounding box is what
-    VITON-style datasets do by construction, and it is the single largest
-    quality lever left on data like this.
-
-    The crop is taken at native resolution and resized once, so the detail that
-    3% of a large photo actually contains is preserved rather than discarded by
-    an early downscale. The box is grown to the frame's aspect ratio so nothing
-    is cut off and the resize introduces no distortion.
-    """
+def read_person(person_path, parse_path, *, num_classes: int):
+    """Read a photo and its parse map at native resolution, aligned."""
     person = read_rgb(person_path)
     parse = read_labels(parse_path, num_classes)
 
     # Parse maps are often exported at a different resolution to the photo.
     if parse.shape[-2:] != person.shape[-2:]:
         parse = resize_labels(parse, *person.shape[-2:])
+    return person, parse
+
+
+def crop_box_for(parse: torch.Tensor, scheme: LabelScheme,
+                 labels: tuple[int, ...] | None, *, mode: str = "garment",
+                 context: float = 0.6, margin: float = 0.05,
+                 aspect: float | None = None) -> tuple[int, int, int, int]:
+    """Choose the region of the photo to train on.
+
+    `mode="person"` frames the whole body. That sounds right and measures badly:
+    a standing person has an aspect around 0.27, so growing the box to the
+    frame's 0.75 adds nearly three times the width in pure background. On
+    full-body photos it leaves an upper garment covering ~6% of the frame.
+
+    `mode="garment"` frames the garment plus `context` of slack around it, then
+    extends the box to include the head so identity is preserved. That puts the
+    resolution where the editing happens — the same half-body framing VITON-style
+    datasets have by construction — and roughly triples garment coverage on
+    full-body shots.
+
+    Falls back to the whole body when the garment region is empty.
+    """
+    if mode == "garment" and labels:
+        garment = mask_from_labels(parse, labels)
+        if garment.sum() > 0:
+            region = torch.zeros_like(garment)
+            top, left, box_h, box_w = bbox_from_mask(garment, margin=context)
+            region[:, top:top + box_h, left:left + box_w] = 1.0
+
+            # Keep the face in frame: cropping it out leaves the model rendering
+            # a headless torso, and the identity channel with nothing to carry.
+            head = mask_from_labels(parse, scheme.identity)
+            if head.sum() > 0:
+                region = torch.maximum(region, head)
+
+            return bbox_from_mask(region, margin=margin, aspect=aspect)
+
+    return bbox_from_mask((parse > 0).float(), margin=margin, aspect=aspect)
+
+
+def load_person(person_path, parse_path, *, height: int, width: int,
+                num_classes: int, crop_to_person: bool = True,
+                margin: float = 0.05, scheme: LabelScheme | None = None,
+                labels: tuple[int, ...] | None = None,
+                crop_mode: str = "garment", crop_context: float = 0.6):
+    """Load a person and their parse map, cropped and resized to the frame.
+
+    The crop is taken at native resolution and resized once, so the detail a
+    small part of a large photo actually contains is preserved rather than
+    discarded by an early downscale.
+    """
+    person, parse = read_person(person_path, parse_path, num_classes=num_classes)
 
     if crop_to_person:
-        silhouette = (parse > 0).float()
-        if silhouette.sum() > 0:
-            box = bbox_from_mask(silhouette, margin=margin,
-                                 aspect=width / height)
-            person, parse = crop(person, box), crop(parse, box)
+        box = crop_box_for(parse, scheme, labels, mode=crop_mode,
+                           context=crop_context, margin=margin,
+                           aspect=width / height)
+        person, parse = crop(person, box), crop(parse, box)
 
     return resize_rgb(person, height, width), resize_labels(parse, height, width)
 
@@ -157,58 +194,113 @@ def flags_for(measures: dict, confident: bool, thresholds: dict | None = None) -
     return flags
 
 
+def load_sample(paths: dict, *, height: int, width: int, scheme: LabelScheme,
+                field: str, parse_source: str = "auto",
+                segmentation_role: str = "auto", canonicalise: bool = True,
+                garment_fill: float = 0.8, crop_to_person: bool = True,
+                crop_margin: float = 0.05, crop_mode: str = "garment",
+                crop_context: float = 0.6):
+    """The one loading path. Dataset, checker and inference all call this.
+
+    Order matters and is not obvious: the crop depends on which garment is being
+    swapped, but identifying that needs the garment image. So the garment is
+    prepared first, the region is chosen from the *uncropped* person, and only
+    then is the photo cropped around it.
+
+    Returns (person, parse, garment, garment_mask, labels, confident,
+    raw_mask_fraction), all at the target frame size.
+    """
+    person_native, parse_native = read_person(
+        paths["person"], paths[field], num_classes=scheme.num_classes)
+
+    # The garment is masked at its own native resolution, so a garment occupying
+    # a small part of a large photo keeps the detail that part contains.
+    garment_native = read_rgb(paths["garment"])
+    mask_native = resolve_garment_mask(
+        paths, garment_native, height=garment_native.shape[-2],
+        width=garment_native.shape[-1], parse_source=parse_source,
+        segmentation_role=segmentation_role)
+
+    # Measured before canonicalisation: cropping and rescaling makes every
+    # garment fill the frame, so afterwards a thumbnail on a large canvas would
+    # measure the same as a full-bleed shot and MASK_TINY could never fire.
+    raw_mask_fraction = float(mask_native.mean())
+
+    garment, mask = canonicalise_garment(
+        garment_native, mask_native, height, width,
+        fill=garment_fill if canonicalise else 1.0)
+
+    # Identify the garment's region against the whole photo, before cropping.
+    labels, confident = select_garment_labels(
+        scheme,
+        resize_labels(parse_native, height, width),
+        resize_rgb(person_native, height, width),
+        garment, mask,
+        hint=role_from_filename(Path(paths["garment"]).stem),
+    )
+
+    if crop_to_person:
+        box = crop_box_for(parse_native, scheme, labels, mode=crop_mode,
+                           context=crop_context, margin=crop_margin,
+                           aspect=width / height)
+        person_native = crop(person_native, box)
+        parse_native = crop(parse_native, box)
+
+    person = resize_rgb(person_native, height, width)
+    parse = resize_labels(parse_native, height, width)
+    return person, parse, garment, mask, labels, confident, raw_mask_fraction
+
+
+def load_for_diagnosis(paths: dict, field: str, *, height: int, width: int,
+                       parse_source: str = "auto", canonicalise: bool = True,
+                       crop_to_person: bool = True, crop_margin: float = 0.05):
+    """Load a sample without committing to a label scheme.
+
+    Identifying the scheme is the question being asked, so the loading cannot
+    depend on the answer: the parse is read with a permissive class count, and
+    the crop uses the whole-body silhouette, which is `parse > 0` under every
+    convention. Both schemes then score the same pixels, which is what makes the
+    comparison fair.
+    """
+    person, parse = read_person(paths["person"], paths[field], num_classes=32)
+
+    if crop_to_person:
+        box = crop_box_for(parse, None, None, mode="person",
+                           margin=crop_margin, aspect=width / height)
+        person, parse = crop(person, box), crop(parse, box)
+
+    garment = read_rgb(paths["garment"])
+    mask = resolve_garment_mask(paths, garment, height=garment.shape[-2],
+                                width=garment.shape[-1],
+                                parse_source=parse_source)
+    garment, mask = canonicalise_garment(garment, mask, height, width,
+                                         fill=0.8 if canonicalise else 1.0)
+
+    return (resize_rgb(person, height, width),
+            resize_labels(parse, height, width), garment, mask)
+
+
 def inspect_record(record, root: Path, *, height: int, width: int,
-                   scheme: LabelScheme, parse_source: str = "auto",
-                   segmentation_role: str = "auto", canonicalise: bool = True,
-                   garment_fill: float = 0.8, crop_to_person: bool = True,
-                   crop_margin: float = 0.15,
-                   thresholds: dict | None = None) -> SampleReport:
+                   scheme: LabelScheme, thresholds: dict | None = None,
+                   **load_kwargs) -> SampleReport:
     """Measure one sample exactly as training would load it."""
     paths = record.resolve(root)
-    field = parse_field_for(paths, parse_source)
+    field = parse_field_for(paths, load_kwargs.get("parse_source", "auto"))
 
     if paths.get(field) is None:
         return SampleReport(record.key, ["NO_PARSE_FILE"], {})
 
     try:
-        person, parse = load_person(
-            paths["person"], paths[field], height=height, width=width,
-            num_classes=scheme.num_classes, crop_to_person=crop_to_person,
-            margin=crop_margin,
-        )
-        garment = read_rgb(paths["garment"])
+        _, parse, _, _, labels, confident, raw_mask = load_sample(
+            paths, height=height, width=width, scheme=scheme, field=field,
+            **load_kwargs)
     except Exception as error:
         return SampleReport(record.key, [f"UNREADABLE({type(error).__name__})"], {})
-
-    mask = resolve_garment_mask(paths, garment, height=garment.shape[-2],
-                                width=garment.shape[-1],
-                                parse_source=parse_source,
-                                segmentation_role=segmentation_role)
-
-    # Measure the mask *before* canonicalisation. Cropping and rescaling makes
-    # every garment fill the frame, so a thumbnail on a large canvas would
-    # measure the same as a full-bleed shot — and MASK_TINY would never fire.
-    # What matters is how much real resolution the source image devoted to the
-    # garment, because canonicalising a 14x18 patch up to 256x192 produces a
-    # blurred smear that the warper then treats as fabric detail.
-    raw_mask_fraction = float(mask.mean())
-
-    if canonicalise:
-        garment, mask = canonicalise_garment(garment, mask, height, width,
-                                             fill=garment_fill)
-    else:
-        garment = resize_rgb(garment, height, width)
-        mask = resize_labels(mask.long(), height, width).float()
-
-    labels, confident = select_garment_labels(
-        scheme, parse, person, garment, mask,
-        hint=role_from_filename(Path(paths["garment"]).stem),
-    )
 
     measures = {
         "noise": fragmentation(parse),
         "garment": float(mask_from_labels(parse, labels).mean()),
-        "mask": raw_mask_fraction,
+        "mask": raw_mask,
         "identity": float(mask_from_labels(parse, scheme.identity).mean()),
     }
     return SampleReport(record.key, flags_for(measures, confident, thresholds),
