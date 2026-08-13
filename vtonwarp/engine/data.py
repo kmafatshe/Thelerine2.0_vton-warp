@@ -17,6 +17,20 @@ from ..data.manifest import (
 )
 
 
+def _drop_without_parse(records, config, label: str):
+    """Keep only records that have a label map from the configured source."""
+    source = config.data.get("parse_source", "auto")
+    if source == "auto":
+        keep = [r for r in records if r.cihp or r.segmentation]
+    else:
+        keep = [r for r in records if getattr(r, source)]
+
+    if len(keep) < len(records):
+        print(f"[data] {label}: dropping {len(records) - len(keep)} of "
+              f"{len(records)} sample(s) with no parse map from '{source}'")
+    return keep
+
+
 def build_dataloaders(config):
     root = Path(config.data.root)
     # `manifest: null` in YAML means "use the default", so `or` not `get`.
@@ -42,26 +56,27 @@ def build_dataloaders(config):
                 f"No samples found under {root}. Run scripts/check_dataset.py to "
                 "see how filenames were matched."
             )
-        source = config.data.get("parse_source", "auto")
-        has_parse = (lambda r: bool(r.cihp or r.segmentation)) if source == "auto" \
-            else (lambda r: bool(getattr(r, source)))
-        usable = [r for r in records if has_parse(r)]
-        if len(usable) < len(records):
-            print(f"[data] dropping {len(records) - len(usable)} sample(s) with no "
-                  f"parse map from source '{source}'")
-            records = usable
-        if not records:
-            raise RuntimeError(
-                f"No parse maps matched under {root}, so the clothing-agnostic "
-                "input cannot be built. Run scripts/check_dataset.py for a "
-                "breakdown of what was found."
-            )
         train_records, val_records = split_records(
             records, config.data.get("val_fraction", 0.15), config.get("seed", 42)
         )
         write_manifest(manifest_path, train_records, val_records)
         print(f"[data] wrote manifest with {len(train_records)} train / "
               f"{len(val_records)} val samples -> {manifest_path}")
+
+    # Filtering happens here, outside the branch above, so it applies to a
+    # cached manifest too. A manifest written before parse_source was set
+    # otherwise carries samples that have no map from the chosen source, and
+    # they fail one by one deep inside the dataloader instead of here.
+    train_records = _drop_without_parse(train_records, config, "train")
+    val_records = _drop_without_parse(val_records, config, "val")
+
+    if not train_records:
+        raise RuntimeError(
+            f"No training samples have a parse map from source "
+            f"'{config.data.get('parse_source', 'auto')}'. Run "
+            "scripts/check_dataset.py --diagnose-labels to see which folder "
+            "holds the label maps."
+        )
 
     shared = dict(
         root=root,
