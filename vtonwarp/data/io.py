@@ -136,9 +136,12 @@ def garment_mask_from_rgb(garment: torch.Tensor, tolerance: float = 0.12,
     mask = (distance > tolerance).float()
 
     # A busy background (a room, a floor) will not be uniform, so the estimate
-    # can fail. If it does, fall back to keeping everything rather than
-    # returning a mask that is mostly holes.
-    if mask.mean() < 0.01 or mask.mean() > 0.97:
+    # can fail. Falling back to "keep everything" is only right when detection
+    # found essentially nothing; an earlier threshold of 1% also swallowed
+    # genuinely small garments — a thumbnail on a large canvas came back as a
+    # full-frame mask, and the warper was handed the whole black background as
+    # if it were fabric.
+    if mask.mean() < 0.001 or mask.mean() > 0.97:
         return torch.ones_like(mask)
 
     return _largest_component(mask)

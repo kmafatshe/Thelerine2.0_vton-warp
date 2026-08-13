@@ -54,7 +54,7 @@ def select_garment_labels(
     garment_mask: torch.Tensor,
     hint: str | None = None,
     min_area: float = 0.01,
-) -> tuple[int, ...]:
+) -> tuple[tuple[int, ...], bool]:
     """Work out which parse region *this* garment corresponds to.
 
     A fixed `garment_type` assumes every sample in the dataset swaps the same
@@ -74,17 +74,23 @@ def select_garment_labels(
     Colour matching alone is fooled by a black top over black trousers, so the
     filename hint wins whenever it names a role the scheme knows and that region
     is actually present.
+
+    Returns `(labels, confident)`. `confident` is False when neither signal
+    resolved anything and the caller is getting a blanket "all upper-body
+    labels" guess — which trains the warper against a region that has nothing
+    to do with the garment, so those samples are worth excluding rather than
+    silently accepting.
     """
     present = set(parse.unique().tolist())
 
     if hint and hint in scheme.roles:
         hinted = tuple(i for i in scheme.roles[hint] if i in present)
         if hinted:
-            return hinted
+            return hinted, True
 
     garment_area = garment_mask.sum()
     if garment_area < 1:
-        return scheme.garment_labels("upper")
+        return scheme.garment_labels("upper"), False
     garment_colour = (garment * garment_mask).sum(dim=[1, 2]) / garment_area
 
     scored: list[tuple[float, int]] = []
@@ -100,7 +106,7 @@ def select_garment_labels(
         scored.append((float((colour - garment_colour).pow(2).sum().sqrt()), label))
 
     if not scored:
-        return scheme.garment_labels("upper")
+        return scheme.garment_labels("upper"), False
 
     scored.sort()
     best_distance, best_label = scored[0]
@@ -111,7 +117,7 @@ def select_garment_labels(
         label for distance, label in scored[1:]
         if distance <= best_distance * 1.3 + 0.05
     ]
-    return tuple(sorted(selected))
+    return tuple(sorted(selected)), True
 
 
 def build_agnostic(

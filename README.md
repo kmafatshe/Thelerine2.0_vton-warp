@@ -285,6 +285,28 @@ what fraction of the frame the garment covers, and writes a contact sheet. Look
 at the `agnostic` column: **if you can still see the original garment, stop and
 fix that before training anything.**
 
+**Step 0b — audit every sample.**
+
+```bash
+python scripts/check_dataset.py --root /path/to/dataset --audit
+```
+
+A contact sheet shows six samples; a 50-sample dataset can hide a dozen broken
+ones behind them, and each is 2% of the training signal. This measures all of
+them and names the bad ones:
+
+| flag | meaning |
+|---|---|
+| `NOISY_PARSE` | adjacent pixels disagree far too often — speckle, not a segmentation. Usually argmax over a probability stack, or a label map saved as lossy JPEG |
+| `NO_GARMENT` | the selected garment region is negligible; nothing for the warper to aim at |
+| `GUESSED` | neither filename nor colour identified the garment's region |
+| `MASK_FULL` | the garment mask covers nearly the whole frame, so background would be warped onto the body |
+| `MASK_TINY` | the garment occupies almost none of its product shot |
+| `IDENTITY_BIG` | face/hair cover an implausible share — the parse is not tracking the person |
+
+Training drops flagged samples by default (`data.audit_filter`). If many are
+flagged, fix them upstream rather than disabling the filter.
+
 **Step 1 — train the warper to convergence.**
 
 ```bash

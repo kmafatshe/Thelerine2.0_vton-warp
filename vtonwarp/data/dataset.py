@@ -28,6 +28,7 @@ from .io import (
     load_mask,
 )
 from .labels import get_scheme, role_from_filename
+from .quality import resolve_garment_mask
 from .manifest import TripletRecord
 
 
@@ -103,12 +104,12 @@ class TripletVTONDataset(Dataset):
         )
 
         if self.garment_type == "auto":
-            labels = select_garment_labels(
+            labels, confident = select_garment_labels(
                 self.scheme, parse, person, garment, garment_mask,
                 hint=role_from_filename(Path(paths["garment"]).stem),
             )
         else:
-            labels = self.scheme.garment_labels(self.garment_type)
+            labels, confident = self.scheme.garment_labels(self.garment_type), True
 
         sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
         sample.update(
@@ -120,6 +121,7 @@ class TripletVTONDataset(Dataset):
                 "garment": garment,
                 "garment_input_mask": garment_mask,
                 "garment_labels": ",".join(str(i) for i in labels),
+                "labels_confident": confident,
                 "condition": stack_condition(sample),
             }
         )
@@ -146,29 +148,12 @@ class TripletVTONDataset(Dataset):
         )
 
     def _load_garment_mask(self, paths: dict, garment: torch.Tensor) -> torch.Tensor:
-        """Mask of the flat garment product image.
-
-        Note this is the mask of the garment *lying flat*, not on the body — it
-        tells the warper which pixels of the source image are actually garment.
-        If the dataset's segmentation folder describes the person instead, we
-        fall back to segmenting the product shot from its background.
-        """
-        # If the segmentation folder is what we are reading the parse map from,
-        # it describes the *person*, not the flat garment. Using it as both
-        # would mask the product shot with a body silhouette.
-        is_parse_source = self.parse_source == "segmentation" or (
-            self.parse_source == "auto" and paths.get("cihp") is None
+        """Mask of the flat garment. Shared with the checker via `quality`."""
+        return resolve_garment_mask(
+            paths, garment, height=self.height, width=self.width,
+            parse_source=self.parse_source,
+            segmentation_role=self.segmentation_role,
         )
-
-        if (paths["segmentation"] is not None and not is_parse_source
-                and self.segmentation_role in ("auto", "garment_mask")):
-            mask = load_mask(paths["segmentation"], self.height, self.width)
-            # A mask covering most of the frame is a person silhouette, not a
-            # flat garment; reject it rather than corrupt the warp supervision.
-            if 0.02 < mask.mean().item() < 0.75:
-                return (mask > 0.5).float()
-
-        return garment_mask_from_rgb(garment)
 
 
 def collate(batch: list[dict]) -> dict:

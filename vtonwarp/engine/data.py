@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 
 from ..data.augment import PairedAugment
 from ..data.dataset import TripletVTONDataset, collate
+from ..data.labels import get_scheme
+from ..data.quality import audit as quality_audit
 from ..data.manifest import (
     build_manifest,
     read_manifest,
@@ -28,6 +30,37 @@ def _drop_without_parse(records, config, label: str):
     if len(keep) < len(records):
         print(f"[data] {label}: dropping {len(records) - len(keep)} of "
               f"{len(records)} sample(s) with no parse map from '{source}'")
+    return keep
+
+
+def _drop_flagged(records, config, label: str):
+    """Exclude samples the quality audit rejects.
+
+    On a ~50-sample dataset a handful of broken parse maps is a large fraction
+    of the training signal, and their effect is not obvious — the warp just
+    comes out worse. Dropping them is almost always better than training on
+    them; `check_dataset.py --audit` names exactly which ones and why.
+    """
+    reports = quality_audit(
+        records, Path(config.data.root),
+        height=config.data.height, width=config.data.width,
+        scheme=get_scheme(config.data.get("label_scheme", "cihp")),
+        parse_source=config.data.get("parse_source", "auto"),
+        segmentation_role=config.data.get("segmentation_role", "auto"),
+        canonicalise=config.data.get("canonicalise_garment", True),
+        garment_fill=config.data.get("garment_fill", 0.8),
+    )
+    bad = {r.key for r in reports if r.flags}
+    keep = [r for r in records if r.key not in bad]
+
+    if bad:
+        from collections import Counter
+        counts = Counter(f for r in reports if r.flags for f in r.flags)
+        print(f"[data] {label}: dropping {len(records) - len(keep)} of "
+              f"{len(records)} sample(s) failing the quality audit "
+              f"{dict(counts.most_common())}")
+        print(f"[data] run scripts/check_dataset.py --audit to see which, or "
+              f"set data.audit_filter=false to keep them")
     return keep
 
 
@@ -70,12 +103,29 @@ def build_dataloaders(config):
     train_records = _drop_without_parse(train_records, config, "train")
     val_records = _drop_without_parse(val_records, config, "val")
 
+    # Kept so the error below can name the actual cause. Reporting "no parse
+    # map" when every sample was in fact rejected by the audit sends you to
+    # diagnose the wrong thing entirely.
+    with_parse = len(train_records)
+
+    if config.data.get("audit_filter", True):
+        train_records = _drop_flagged(train_records, config, "train")
+        val_records = _drop_flagged(val_records, config, "val")
+
     if not train_records:
+        source = config.data.get("parse_source", "auto")
+        if with_parse == 0:
+            raise RuntimeError(
+                f"No training samples have a parse map from source '{source}'. "
+                "Run scripts/check_dataset.py --diagnose-labels to see which "
+                "folder holds the label maps."
+            )
         raise RuntimeError(
-            f"No training samples have a parse map from source "
-            f"'{config.data.get('parse_source', 'auto')}'. Run "
-            "scripts/check_dataset.py --diagnose-labels to see which folder "
-            "holds the label maps."
+            f"All {with_parse} training samples were rejected by the quality "
+            f"audit. Run scripts/check_dataset.py --audit --parse-source "
+            f"{source} to see why. If the flags are wrong for your data, set "
+            "data.audit_filter=false; if they are right, the parse maps or "
+            "garment shots need regenerating."
         )
 
     shared = dict(

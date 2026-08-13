@@ -24,6 +24,10 @@ sys.stdout.reconfigure(line_buffering=True)
 REPO = Path(sys.argv[1])
 DATA = Path(sys.argv[2])
 OUT = Path(sys.argv[3])
+# The notebook ships the answers for the real dataset; a dummy set needs
+# its own. Pass them so the harness exercises either configuration.
+SCHEME = sys.argv[4] if len(sys.argv) > 4 else "cihp"
+PARSE = sys.argv[5] if len(sys.argv) > 5 else "cihp"
 
 SUBSTITUTIONS = [
     ("DATA_ROOT = Path('/content/drive/MyDrive/thelerineAI/Itekanye1.1_TripletDataset')",
@@ -35,7 +39,8 @@ SUBSTITUTIONS = [
     ("BATCH_SIZE = 8", "BATCH_SIZE = 2"),
     ("'--limit', 5", "'--limit', 2"),
     ("TRYON_STEPS + 4000", "TRYON_STEPS + 4"),
-    ("PARSE_SOURCE = 'segmentation'", "PARSE_SOURCE = 'segmentation'"),
+    ("LABEL_SCHEME = 'cihp'", f"LABEL_SCHEME = {SCHEME!r}"),
+    ("PARSE_SOURCE = 'segmentation'", f"PARSE_SOURCE = {PARSE!r}"),
     ("'/content/dataset_check.png'", f"'{OUT}/dataset_check.png'"),
     # Skip the VGG download in a smoke run.
     ("'train.num_workers=2',", "'train.num_workers=0', 'loss.perceptual=0.0',"),

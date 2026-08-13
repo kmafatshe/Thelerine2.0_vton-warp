@@ -71,6 +71,16 @@ class TryOnPipeline:
 
     def __init__(self, checkpoint_path: str, device):
         checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
+
+        # A warp.pt has no composer and no warp_checkpoint key, so every
+        # attribute lookup below fails with something unrelated to the mistake.
+        if "composer" not in checkpoint.get("models", {}):
+            raise SystemExit(
+                f"{checkpoint_path} is a stage-1 (warp) checkpoint. Inference "
+                "needs the stage-2 checkpoint, normally named tryon.pt — train "
+                "stage 2 first with train_tryon.py."
+            )
+
         config = Config(checkpoint["config"])
         self.config = config
         self.device = device
@@ -124,7 +134,7 @@ class TryOnPipeline:
                                self.scheme.num_classes)
 
         if self.garment_type == "auto" and garment is not None:
-            labels = select_garment_labels(
+            labels, _ = select_garment_labels(
                 self.scheme, parse, person, garment[0], mask[0], hint=hint,
             )
         elif self.garment_type == "auto":

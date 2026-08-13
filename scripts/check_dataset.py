@@ -40,8 +40,16 @@ from vtonwarp.data.io import (
     load_label_map,
     load_mask,
 )
-from vtonwarp.data.labels import ATR, CIHP, get_scheme, role_from_filename
+from vtonwarp.data.labels import (
+    ATR,
+    CIHP,
+    get_scheme,
+    mask_from_labels,
+    role_from_filename,
+)
 from vtonwarp.data.manifest import build_manifest, describe_layout, resolve_layout
+from vtonwarp.data.quality import audit as quality_audit
+from vtonwarp.data.quality import resolve_garment_mask
 from vtonwarp.engine.visualize import contact_sheet
 
 
@@ -59,6 +67,8 @@ def parse_args():
                         help="cihp (= LIP, 20 classes) or atr (18 classes)")
     parser.add_argument("--diagnose-labels", action="store_true",
                         help="score each parsing convention against the data")
+    parser.add_argument("--audit", action="store_true",
+                        help="per-sample quality report over the whole dataset")
     parser.add_argument("--parse-source", default="auto",
                         choices=("auto", "cihp", "segmentation"))
     parser.add_argument("--no-canonicalise", action="store_true")
@@ -123,6 +133,10 @@ def main():
         diagnose_labels(records, root, args)
         return
 
+    if args.audit:
+        audit(records, root, args, scheme)
+        return
+
     label_counter = Counter()
     coverage = []
     seg_means = []
@@ -157,7 +171,7 @@ def main():
             garment, mask = canonicalise_garment(garment, mask)
 
         if args.garment_type == "auto":
-            labels = select_garment_labels(
+            labels, _ = select_garment_labels(
                 scheme, parse, person, garment, mask,
                 hint=role_from_filename(Path(paths["garment"]).stem),
             )
@@ -230,19 +244,60 @@ def main():
     print("        'target garment': must show the same garment as the 'garment' column.")
 
 
-def _garment_mask(paths, garment, args, parse_field=None):
-    """Same precedence the dataset uses, so the check reflects training.
+def audit(records, root, args, scheme, max_listed: int = 40):
+    """Per-sample quality report over the whole dataset.
 
-    `parse_field` names the folder the label map is being read from. If that is
-    the segmentation folder then it describes the *person*, and using it as the
-    flat garment's mask would mask a product shot with a body silhouette —
-    which quietly wrecks the colour comparison this diagnostic depends on.
+    The measurement itself lives in vtonwarp/data/quality.py, so what this
+    prints is exactly what training will act on. See that module for what each
+    flag means.
     """
-    if paths["segmentation"] is not None and parse_field != "segmentation":
-        mask = load_mask(paths["segmentation"], args.height, args.width)
-        if 0.02 < mask.mean().item() < 0.75:
-            return (mask > 0.5).float()
-    return garment_mask_from_rgb(garment)
+    print(f"\n[audit] checking all {len(records)} samples "
+          f"(scheme '{scheme.name}', parse source '{args.parse_source}')\n")
+
+    reports = quality_audit(
+        records, root, height=args.height, width=args.width, scheme=scheme,
+        parse_source=args.parse_source, canonicalise=not args.no_canonicalise,
+    )
+    flagged = [r for r in reports if r.flags]
+
+    print(f"  {'sample':<22} {'noise':>7} {'garment':>8} {'mask':>7} "
+          f"{'ident':>7}  flags")
+    for report in flagged[:max_listed]:
+        m = report.measures
+        if m:
+            print(f"  {report.key:<22} {m['noise']:>7.3f} {m['garment']:>8.3f} "
+                  f"{m['mask']:>7.3f} {m['identity']:>7.3f}  "
+                  f"{','.join(report.flags)}")
+        else:
+            print(f"  {report.key:<22} {'-':>7} {'-':>8} {'-':>7} {'-':>7}  "
+                  f"{','.join(report.flags)}")
+    if len(flagged) > max_listed:
+        print(f"  ... and {len(flagged) - max_listed} more")
+
+    print(f"\n[audit] {len(reports) - len(flagged)} clean, {len(flagged)} "
+          f"flagged, of {len(reports)}")
+
+    measured = [r.measures for r in reports if r.measures]
+    if measured:
+        median = lambda k: sorted(m[k] for m in measured)[len(measured) // 2]  # noqa: E731
+        print(f"[audit] medians — noise {median('noise'):.3f}  "
+              f"garment {median('garment'):.3f}  mask {median('mask'):.3f}  "
+              f"identity {median('identity'):.3f}")
+
+    counts = Counter(f for r in flagged for f in r.flags)
+    if counts:
+        print("[audit] flag counts:", dict(counts.most_common()))
+    print("\n[audit] training drops flagged samples automatically; set "
+          "data.audit_filter=false to keep them")
+
+
+def _garment_mask(paths, garment, args, parse_field=None):
+    """Delegates to the shared resolver so the check reflects training."""
+    return resolve_garment_mask(
+        paths, garment, height=args.height, width=args.width,
+        parse_source=("segmentation" if parse_field == "segmentation"
+                      else args.parse_source),
+    )
 
 
 def diagnose_labels(records, root, args, limit: int = 12):

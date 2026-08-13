@@ -45,6 +45,11 @@ data:
   canonicalise_garment: true
   garment_fill: 0.8
 
+  # Drop samples that fail the per-sample quality audit (noisy parse
+  # maps, no garment region, degenerate garment masks). See
+  # check_dataset.py --audit for the list and the reasons.
+  audit_filter: true
+
   erase_dilate: 5                # px of slack around the erased garment region
   val_fraction: 0.15
 
