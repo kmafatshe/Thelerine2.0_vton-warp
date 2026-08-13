@@ -54,6 +54,7 @@ def _drop_flagged(records, config, label: str):
         crop_mode=config.data.get("crop_mode", "garment"),
         crop_context=config.data.get("crop_context", 0.6),
         max_side=config.data.get("max_side", 1536),
+        thresholds=dict(config.data.get("audit_thresholds", {})),
     )
     bad = {r.key for r in reports if r.flags}
     keep = [r for r in records if r.key not in bad]

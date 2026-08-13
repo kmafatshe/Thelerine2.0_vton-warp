@@ -37,6 +37,7 @@ from vtonwarp.data.agnostic import CONDITION_CHANNELS
 from vtonwarp.engine.checkpoint import load_checkpoint, maybe_resume, save_checkpoint
 from vtonwarp.engine.data import build_dataloaders, infinite
 from vtonwarp.engine.ema import ModelEMA
+from vtonwarp.engine.schedule import build_onecycle
 from vtonwarp.engine.visualize import contact_sheet
 from vtonwarp.losses.gan import discriminator_loss, generator_loss
 from vtonwarp.losses.perceptual import PerceptualLoss
@@ -85,6 +86,40 @@ def load_warper(config, device):
     return warper.to(device)
 
 
+def warn_stale_samples(samples_dir: Path) -> None:
+    """Point out sheets left by a previous run into the same output_dir.
+
+    They are only overwritten as the new run reaches each step, so until then
+    the folder mixes two runs and the newest-numbered file is the *old* one —
+    which is exactly the wrong sheet to judge a fresh run by.
+    """
+    existing = sorted(samples_dir.glob("*.png")) if samples_dir.exists() else []
+    if existing:
+        print(f"[data] note: {len(existing)} sample sheet(s) from a previous run "
+              f"are already in {samples_dir}")
+        print(f"[data]       the newest is {existing[-1].name}, which this run has "
+              "not written yet — check the caption stamped on any sheet before "
+              "judging it")
+
+
+def run_caption(config, step: int) -> str:
+    """A one-line record of what produced a sheet, stamped onto it.
+
+    Fields are joined with a visible separator: at the small font a contact
+    sheet header uses, single spaces disappear and the values run together.
+    """
+    data = config.data
+    crop = data.get("crop_mode") if data.get("crop_to_person") else "off"
+    return " | ".join([
+        f"step {step}",
+        f"scheme {data.get('label_scheme')}",
+        f"source {data.get('parse_source')}",
+        f"crop {crop}",
+        f"garment {data.get('garment_type')}",
+        f"gan {config.loss.get('gan')}",
+    ])
+
+
 def main():
     args = parse_args()
     config = load_config(args.config, args.overrides)
@@ -121,13 +156,7 @@ def main():
         composer.parameters(), lr=config.train.lr, betas=(0.5, 0.999),
         weight_decay=config.train.get("weight_decay", 1e-4),
     )
-    # 10% warmup, but never fewer than 2 steps — OneCycleLR divides by the
-    # warmup length and a very short smoke run would otherwise crash.
-    warmup_pct = min(0.5, max(0.1, 2.0 / config.train.steps))
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimiser, max_lr=config.train.lr, total_steps=config.train.steps,
-        pct_start=warmup_pct, div_factor=10.0, final_div_factor=100.0,
-    )
+    scheduler = build_onecycle(optimiser, config.train.lr, config.train.steps)
     ema = ModelEMA(composer, decay=config.train.get("ema_decay", 0.999))
 
     use_gan = weights.get("gan", 0) > 0
@@ -143,6 +172,8 @@ def main():
 
     checkpoint_path = output_dir / "tryon.pt"
     start_step = 0
+    if not config.train.get("resume", True):
+        warn_stale_samples(output_dir / "samples")
     if config.train.get("resume", True):
         start_step = maybe_resume(checkpoint_path, "composer", model=composer,
                                   ema=ema, optimiser=optimiser, scheduler=scheduler,
@@ -228,7 +259,8 @@ def main():
 
         if step % config.train.sample_every == 0 or step == config.train.steps:
             evaluate(warper, ema.module, val_loader, device,
-                     output_dir / "samples" / f"tryon_{step:06d}.png")
+                     output_dir / "samples" / f"tryon_{step:06d}.png",
+                     caption=run_caption(config, step))
 
         if step % config.train.save_every == 0 or step == config.train.steps:
             save_checkpoint(
@@ -287,7 +319,8 @@ def _train_discriminator(discriminator, optimiser, fake, real, condition, config
 
 
 @torch.no_grad()
-def evaluate(warper, composer, loader, device, path: Path) -> None:
+def evaluate(warper, composer, loader, device, path: Path,
+             caption: str | None = None) -> None:
     warper.eval()
     composer.eval()
     batch = next(iter(loader))
@@ -307,6 +340,7 @@ def evaluate(warper, composer, loader, device, path: Path) -> None:
             "ground truth": batch["person"],
         },
         path,
+        caption=caption,
     )
     print(f"[tryon] wrote {path}")
 

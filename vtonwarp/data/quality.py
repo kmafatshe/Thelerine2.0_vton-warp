@@ -36,6 +36,11 @@ from .labels import LabelScheme, mask_from_labels, role_from_filename
 
 # Each threshold marks a distinct failure mode; see `flags_for`.
 DEFAULT_THRESHOLDS = {
+    # Correct pairs measure ~0.35-0.55 even across a lighting change; genuinely
+    # different garments land above 1.0. Set conservatively within that gap:
+    # dropping a good sample costs 2% of a 45-sample dataset, so a false
+    # positive is expensive and the separation is wide enough to afford it.
+    "pairing": 0.75,
     "noise": 0.25,
     "garment": 0.01,
     "mask_full": 0.90,
@@ -173,11 +178,41 @@ def load_person(person_path, parse_path, *, height: int, width: int,
     return resize_rgb(person, height, width), resize_labels(parse, height, width)
 
 
+def pairing_distance(person: torch.Tensor, parse: torch.Tensor,
+                     garment: torch.Tensor, garment_mask: torch.Tensor,
+                     labels: tuple[int, ...]) -> float:
+    """How unlike each other the flat garment and the worn garment look.
+
+    Every sample asserts "this person is wearing this garment", and the whole
+    training signal rests on it. A hand-built dataset gets that wrong sometimes
+    — a filename that matched the wrong file, or a garment shot that was never
+    replaced — and nothing downstream notices: the warper is simply taught to
+    deform one garment into another's silhouette.
+
+    Comparing mean colours is crude but sufficient. Correct pairs sit around
+    0.2-0.4 even across a lighting change; a genuinely different garment lands
+    near 1.0.
+    """
+    region = mask_from_labels(parse, labels)
+    if region.sum() < 1 or garment_mask.sum() < 1:
+        return 0.0
+
+    worn = (person * region).sum(dim=[1, 2]) / region.sum()
+    flat = (garment * garment_mask).sum(dim=[1, 2]) / garment_mask.sum()
+    return float((worn - flat).pow(2).sum().sqrt())
+
+
 def flags_for(measures: dict, confident: bool, thresholds: dict | None = None) -> list[str]:
     """Name the failure modes a sample exhibits."""
     limits = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     flags = []
 
+    if measures.get("pairing", 0.0) > limits["pairing"]:
+        # The flat garment does not look like what this person is wearing, so
+        # the pair is wrong: the warper would be taught to deform this garment
+        # into an unrelated silhouette. Colour is a blunt test, but a mismatch
+        # large enough to trip it is not a lighting difference.
+        flags.append("GARMENT_MISMATCH")
     if measures["noise"] > limits["noise"]:
         # Adjacent pixels disagree far too often: this is not a segmentation.
         flags.append("NOISY_PARSE")
@@ -301,13 +336,14 @@ def inspect_record(record, root: Path, *, height: int, width: int,
         return SampleReport(record.key, ["NO_PARSE_FILE"], {})
 
     try:
-        _, parse, _, _, labels, confident, raw_mask = load_sample(
+        person, parse, garment, mask, labels, confident, raw_mask = load_sample(
             paths, height=height, width=width, scheme=scheme, field=field,
             **load_kwargs)
     except Exception as error:
         return SampleReport(record.key, [f"UNREADABLE({type(error).__name__})"], {})
 
     measures = {
+        "pairing": pairing_distance(person, parse, garment, mask, labels),
         "noise": fragmentation(parse),
         "garment": float(mask_from_labels(parse, labels).mean()),
         "mask": raw_mask,

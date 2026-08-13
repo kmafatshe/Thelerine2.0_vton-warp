@@ -329,6 +329,7 @@ them and names the bad ones:
 
 | flag | meaning |
 |---|---|
+| `GARMENT_MISMATCH` | the flat garment does not look like what the person is wearing — the pair is wrong, and the warper would be taught to deform this garment into an unrelated silhouette |
 | `NOISY_PARSE` | adjacent pixels disagree far too often — speckle, not a segmentation. Usually argmax over a probability stack, or a label map saved as lossy JPEG |
 | `NO_GARMENT` | the selected garment region is negligible; nothing for the warper to aim at |
 | `GUESSED` | neither filename nor colour identified the garment's region |
@@ -337,7 +338,9 @@ them and names the bad ones:
 | `IDENTITY_BIG` | face/hair cover an implausible share — the parse is not tracking the person |
 
 Training drops flagged samples by default (`data.audit_filter`). If many are
-flagged, fix them upstream rather than disabling the filter.
+flagged, fix them upstream rather than disabling the filter. Every threshold is
+overridable via `data.audit_thresholds` — the measured value for each sample is
+printed, so compare against those before changing one.
 
 **Step 1 — train the warper to convergence.**
 

@@ -30,26 +30,34 @@ def to_uint8(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def contact_sheet(columns: dict[str, torch.Tensor], path: str | Path,
-                  max_rows: int = 8) -> None:
+                  max_rows: int = 8, caption: str | None = None) -> None:
     """Write a grid image: one row per sample, one column per named tensor.
 
     Args:
         columns: name -> (B, C, H, W) tensor. Single-channel entries are shown
             as greyscale.
+        caption: stamped along the top. Sheets are written to a fixed path per
+            step, so a previous run's output sits in the same folder until the
+            new run reaches the same step — and an old sheet is otherwise
+            indistinguishable from a current one. Recording the step and the
+            settings that produced it makes that obvious at a glance.
     """
     from PIL import Image, ImageDraw
 
     names = list(columns)
     rows = min(max_rows, next(iter(columns.values())).shape[0])
     height, width = next(iter(columns.values())).shape[-2:]
-    label_height = 16
+    caption_height = 16 if caption else 0
+    label_height = 16 + caption_height
 
     sheet = Image.new("RGB", (width * len(names), height * rows + label_height),
                       (16, 16, 16))
     draw = ImageDraw.Draw(sheet)
+    if caption:
+        draw.text((4, 3), caption, fill=(255, 210, 90))
 
     for col, name in enumerate(names):
-        draw.text((col * width + 4, 3), name, fill=(230, 230, 230))
+        draw.text((col * width + 4, 3 + caption_height), name, fill=(230, 230, 230))
         tensor = columns[name]
         if tensor.shape[-2:] != (height, width):
             tensor = F.interpolate(tensor, size=(height, width), mode="bilinear",

@@ -260,17 +260,18 @@ def audit(records, root, args, scheme, max_listed: int = 40):
     )
     flagged = [r for r in reports if r.flags]
 
-    print(f"  {'sample':<22} {'noise':>7} {'garment':>8} {'mask':>7} "
-          f"{'ident':>7}  flags")
+    print(f"  {'sample':<22} {'pair':>6} {'noise':>7} {'garment':>8} "
+          f"{'mask':>7} {'ident':>7}  flags")
     for report in flagged[:max_listed]:
         m = report.measures
         if m:
-            print(f"  {report.key:<22} {m['noise']:>7.3f} {m['garment']:>8.3f} "
+            print(f"  {report.key:<22} {m.get('pairing', 0):>6.2f} "
+                  f"{m['noise']:>7.3f} {m['garment']:>8.3f} "
                   f"{m['mask']:>7.3f} {m['identity']:>7.3f}  "
                   f"{','.join(report.flags)}")
         else:
-            print(f"  {report.key:<22} {'-':>7} {'-':>8} {'-':>7} {'-':>7}  "
-                  f"{','.join(report.flags)}")
+            print(f"  {report.key:<22} {'-':>6} {'-':>7} {'-':>8} {'-':>7} "
+                  f"{'-':>7}  {','.join(report.flags)}")
     if len(flagged) > max_listed:
         print(f"  ... and {len(flagged) - max_listed} more")
 
@@ -280,7 +281,8 @@ def audit(records, root, args, scheme, max_listed: int = 40):
     measured = [r.measures for r in reports if r.measures]
     if measured:
         median = lambda k: sorted(m[k] for m in measured)[len(measured) // 2]  # noqa: E731
-        print(f"[audit] medians — noise {median('noise'):.3f}  "
+        print(f"[audit] medians — pair {median('pairing'):.3f}  "
+              f"noise {median('noise'):.3f}  "
               f"garment {median('garment'):.3f}  mask {median('mask'):.3f}  "
               f"identity {median('identity'):.3f}")
 
