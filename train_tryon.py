@@ -203,7 +203,8 @@ def main():
                 terms["tryon/gan_g"] = adversarial
 
             (loss / accumulate).backward()
-            logs = {k: logs.get(k, 0.0) + float(v) / accumulate for k, v in terms.items()}
+            logs = {k: logs.get(k, 0.0) + v.detach().item() / accumulate
+                    for k, v in terms.items()}
 
             if gan_active:
                 logs["tryon/gan_d"] = logs.get("tryon/gan_d", 0.0) + _train_discriminator(

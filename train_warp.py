@@ -92,7 +92,10 @@ def warp_losses(outputs: dict, batch: dict, perceptual, weights) -> tuple[torch.
         "warp/smooth": weights["smooth"],
     }
     total = sum(key_to_weight[name] * value for name, value in terms.items())
-    return total, {name: float(value) for name, value in terms.items()}
+    # .detach() before the scalar conversion: these tensors are part of the
+    # graph that `total` is about to be backpropagated through, and calling
+    # float() on them directly warns about exactly that.
+    return total, {name: value.detach().item() for name, value in terms.items()}
 
 
 def main():
