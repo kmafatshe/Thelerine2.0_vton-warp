@@ -126,6 +126,7 @@ def build_agnostic(
     scheme: LabelScheme,
     garment_labels: tuple[int, ...],
     dilate: int = 5,
+    preserve_legs: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Split a dressed person into keep / erase / describe components.
 
@@ -137,9 +138,13 @@ def build_agnostic(
         dilate: kernel size for expanding the erase region. A few pixels of
             slack hides parsing errors along the garment boundary; without it a
             rim of the original garment survives and the model latches onto it.
+        preserve_legs: keep leg pixels rather than erasing them under a dress or
+            trousers. See LabelScheme.erase_extra for why this is usually right
+            on a small dataset.
     """
     garment_mask = mask_from_labels(parse, garment_labels)
-    erase_labels = tuple(garment_labels) + scheme.erase_extra(garment_labels)
+    erase_labels = tuple(garment_labels) + scheme.erase_extra(
+        garment_labels, preserve_legs=preserve_legs)
     erase_mask = mask_from_labels(parse, erase_labels)
     identity_mask = mask_from_labels(parse, scheme.identity)
 

@@ -83,6 +83,7 @@ SEMANTIC_DATA_KEYS = (
     "height", "width", "label_scheme", "parse_source", "garment_type",
     "crop_to_person", "crop_mode", "crop_context", "crop_margin",
     "canonicalise_garment", "garment_fill", "erase_dilate",
+    "preserve_legs",
 )
 
 

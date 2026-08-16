@@ -154,6 +154,7 @@ def build_dataloaders(config):
         crop_mode=config.data.get("crop_mode", "garment"),
         crop_context=config.data.get("crop_context", 0.6),
         max_side=config.data.get("max_side", 1536),
+        preserve_legs=config.data.get("preserve_legs", True),
         cache=config.data.get("cache_samples", True),
     )
 

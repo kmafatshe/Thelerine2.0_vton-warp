@@ -76,6 +76,9 @@ def parse_args():
                         help="per-sample quality report over the whole dataset")
     parser.add_argument("--parse-source", default="auto",
                         choices=("auto", "cihp", "segmentation"))
+    parser.add_argument("--erase-legs", action="store_true",
+                        help="erase legs under dresses and trousers "
+                             "(the old behaviour)")
     parser.add_argument("--no-canonicalise", action="store_true")
     parser.add_argument("--out", default="outputs/dataset_check.png")
     parser.add_argument("--samples", type=int, default=6)
@@ -175,7 +178,8 @@ def main():
             labels = scheme.garment_labels(args.garment_type)
         chosen[tuple(scheme.labels[i] for i in labels)] += 1
 
-        sample = build_agnostic(person, parse, scheme, labels)
+        sample = build_agnostic(person, parse, scheme, labels,
+                                preserve_legs=not args.erase_legs)
         coverage.append(float(sample["garment_mask"].mean()))
         mask_fractions.append(raw_mask_fraction)
 

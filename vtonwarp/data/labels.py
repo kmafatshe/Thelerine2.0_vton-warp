@@ -66,19 +66,26 @@ class LabelScheme:
             return self.all_garment
         raise ValueError(f"unknown garment_type {garment_type!r}")
 
-    def erase_extra(self, garment_labels: tuple[int, ...]) -> tuple[int, ...]:
+    def erase_extra(self, garment_labels: tuple[int, ...],
+                    preserve_legs: bool = False) -> tuple[int, ...]:
         """Skin whose visibility depends on the garment, so must be erased too.
 
         Swapping a top changes the sleeves, so the arms become unknown; swapping
-        trousers changes the hemline, so the legs do. A dress does both. Getting
-        this wrong leaves the old sleeves in the input and the model learns to
-        copy them.
+        trousers or a dress changes the hemline, so the legs do.
+
+        `preserve_legs` keeps them anyway. Erasing is only worth it if the model
+        can put something better in their place, and on a small dataset it
+        cannot: with legs erased under every dress, the composer has to invent
+        them from nothing and produces a translucent smear below the hem.
+        Keeping the real pixels is the better trade in both directions except
+        one — a new garment *shorter* than the original, where the area below
+        the new hem was the old garment and is erased regardless.
         """
         selected = set(garment_labels)
         extra: tuple[int, ...] = ()
         if selected & set(self.upper + self.dress):
             extra += self.arms + self.torso_skin
-        if selected & set(self.lower + self.dress):
+        if not preserve_legs and selected & set(self.lower + self.dress):
             extra += self.legs
         return tuple(sorted(set(extra)))
 

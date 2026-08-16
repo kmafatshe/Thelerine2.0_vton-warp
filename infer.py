@@ -62,6 +62,9 @@ def parse_args():
     parser.add_argument("--grid", action="store_true",
                         help="render every garment on every validation person")
     parser.add_argument("--limit", type=int, default=4, help="grid size cap")
+    parser.add_argument("--pairs", default="same-type",
+                        choices=("same-type", "all"),
+                        help="which garment/person combinations to render")
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
@@ -95,6 +98,7 @@ class TryOnPipeline:
         self.crop_margin = config.data.get("crop_margin", 0.05)
         self.crop_mode = config.data.get("crop_mode", "garment")
         self.crop_context = config.data.get("crop_context", 0.6)
+        self.preserve_legs = config.data.get("preserve_legs", True)
 
         warp_config = Config(load_checkpoint(config.train.warp_checkpoint,
                                              map_location="cpu")["config"])
@@ -147,7 +151,8 @@ class TryOnPipeline:
         if self.garment_type != "auto":
             labels = self.scheme.garment_labels(self.garment_type)
 
-        sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
+        sample = build_agnostic(person, parse, self.scheme, labels, self.dilate,
+                                preserve_legs=self.preserve_legs)
         return (stack_condition(sample)[None], sample["agnostic"][None],
                 garment[None], mask[None])
 
@@ -201,7 +206,24 @@ def main():
 
 
 def run_grid(pipeline: TryOnPipeline, args) -> None:
-    """Every validation garment on every validation person."""
+    """Every garment on every person, as a matrix.
+
+    By default only *same-type* combinations are rendered — a dress onto someone
+    wearing a dress, trousers onto someone wearing trousers. That is not a way
+    of hiding failures; it is the model's actual competence, and the reason is
+    structural.
+
+    Training is self-paired, so every example the warper saw was a garment
+    deformed onto the region it was cut from. The region to fill comes from the
+    *source person's* parse, so putting a T-shirt on someone wearing a dress
+    asks the warper to stretch a small garment across a dress-shaped hole — a
+    deformation well outside anything it was trained on. Cross-category try-on
+    needs a model that first predicts a new parse for the incoming garment
+    (ACGPN, PF-AFN), which is a separate network and far more data.
+
+    Incompatible cells are left blank rather than filled with a plausible-looking
+    failure. Pass --pairs all to render them anyway.
+    """
     root = Path(args.root or pipeline.config.data.root)
     manifest = Path(pipeline.config.data.get("manifest") or root / "manifest.json")
     _, val_records = read_manifest(manifest)
@@ -209,20 +231,59 @@ def run_grid(pipeline: TryOnPipeline, args) -> None:
     if len(records) < 2:
         print("[infer] fewer than two validation samples; grid will be trivial")
 
+    def garment_role(record):
+        """The garment category this record's own garment belongs to."""
+        return role_from_filename(Path(record.garment).stem)
+
+    roles = {record.key: garment_role(record) for record in records}
+    unknown = [key for key, role in roles.items() if role is None]
+    if unknown and args.pairs == "same-type":
+        print(f"[infer] {len(unknown)} garment(s) have no recognisable type in "
+              f"their filename; they will pair with anything")
+
     columns: dict[str, list[torch.Tensor]] = {}
+    skipped = 0
     for garment_record in records:
         garment_paths = garment_record.resolve(root)
+        garment_role_name = roles[garment_record.key]
         column = []
+
         for person_record in records:
+            person_role = roles[person_record.key]
+            compatible = (
+                args.pairs == "all"
+                or garment_role_name is None or person_role is None
+                or garment_role_name == person_role
+            )
+            if not compatible:
+                # Flat grey, matching the erase colour, so a blank cell reads as
+                # "not attempted" rather than "attempted and came out empty".
+                column.append(torch.zeros(3, pipeline.height, pipeline.width))
+                skipped += 1
+                continue
+
             person_paths = person_record.resolve(root)
             parse_path = person_paths["cihp"] or person_paths["segmentation"]
             condition, _, garment, mask = pipeline.condition_from(
                 person_paths["person"], parse_path, garment_paths["garment"])
             result = pipeline(condition, garment, mask)
             column.append(result["output"][0].cpu())
-        columns[f"garment {garment_record.key}"] = torch.stack(column)
 
-    contact_sheet(columns, args.out, max_rows=len(records))
+        label = f"{garment_record.key}"
+        if garment_role_name:
+            label += f" ({garment_role_name})"
+        columns[label] = torch.stack(column)
+
+    if skipped:
+        print(f"[infer] left {skipped} cross-type cell(s) blank; --pairs all "
+              f"renders them")
+
+    contact_sheet(columns, args.out, max_rows=len(records),
+                  caption=" | ".join([
+                      "rows = people, columns = garments",
+                      f"pairs={args.pairs}",
+                      "blank = incompatible type",
+                  ]))
     print(f"[infer] wrote {args.out}  (row = person, column = garment)")
 
 

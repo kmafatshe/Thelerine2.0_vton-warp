@@ -45,6 +45,7 @@ class TripletVTONDataset(Dataset):
         crop_mode: str = "garment",
         crop_context: float = 0.6,
         max_side: int | None = 1536,
+        preserve_legs: bool = True,
         cache: bool = True,
     ):
         """
@@ -86,6 +87,7 @@ class TripletVTONDataset(Dataset):
         self.crop_mode = crop_mode
         self.crop_context = crop_context
         self.max_side = max_side
+        self.preserve_legs = preserve_legs
         self._cache: dict[int, tuple] = {} if cache else None
 
     def __len__(self) -> int:
@@ -142,7 +144,8 @@ class TripletVTONDataset(Dataset):
             person, parse, garment, garment_mask
         )
 
-        sample = build_agnostic(person, parse, self.scheme, labels, self.dilate)
+        sample = build_agnostic(person, parse, self.scheme, labels, self.dilate,
+                                preserve_legs=self.preserve_legs)
         sample.update(
             {
                 "key": record.key,

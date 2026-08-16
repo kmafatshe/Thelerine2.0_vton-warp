@@ -378,6 +378,19 @@ python train_tryon.py --config configs/tryon.yaml data.root=/path/to/dataset \
 
 **Step 3 — inference.**
 
+By default the grid renders only **same-type** combinations — a dress onto
+someone wearing a dress, trousers onto trousers — and leaves the rest blank.
+
+That is the model's actual competence, not a way of hiding failures. Training is
+self-paired, so every example the warper saw was a garment deformed onto the
+region it was cut from, and the region to fill comes from the *source person's*
+parse. Putting a T-shirt on someone wearing a dress asks it to stretch a small
+garment across a dress-shaped hole — well outside anything it was trained on.
+Cross-category try-on needs a model that first predicts a new parse for the
+incoming garment (ACGPN, PF-AFN): a separate network, and far more data.
+
+`--pairs all` renders the incompatible cells anyway.
+
 ```bash
 # one pair
 python infer.py --checkpoint outputs/tryon/tryon.pt \

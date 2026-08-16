@@ -78,6 +78,13 @@ data:
   # memory. Nothing before augmentation depends on the epoch.
   cache_samples: true
 
+  # Keep leg pixels rather than erasing them under a dress or trousers.
+  # Erasing only pays off if the model can draw something better in their
+  # place; on ~40 samples it cannot, and produces a translucent smear
+  # below the hem. Costs accuracy only when the new garment is shorter
+  # than the original.
+  preserve_legs: true
+
   erase_dilate: 5                # px of slack around the erased garment region
   val_fraction: 0.15
 
