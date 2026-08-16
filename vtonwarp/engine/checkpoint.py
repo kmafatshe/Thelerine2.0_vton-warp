@@ -105,7 +105,9 @@ def check_resume_compatible(checkpoint: dict, config) -> list[str]:
 
 
 def maybe_resume(path: str | Path, name: str, *, model, ema=None,
-                 optimiser=None, scheduler=None, config=None) -> int:
+                 optimiser=None, scheduler=None, config=None,
+                 extra_models: dict | None = None,
+                 extra_optimisers: dict | None = None) -> int:
     """Restore a run in place and return the step to continue from.
 
     Returns 0 when there is nothing to resume, so the caller can always write
@@ -138,6 +140,16 @@ def maybe_resume(path: str | Path, name: str, *, model, ema=None,
         ema.step_count = checkpoint["step"]
     if optimiser is not None and checkpoint["optimisers"].get(name):
         optimiser.load_state_dict(checkpoint["optimisers"][name])
+
+    # Anything else the run needs to continue rather than restart — notably the
+    # discriminator, which is half of an adversarial game and cannot be
+    # reinitialised mid-run without destabilising the generator it faces.
+    for key, module in (extra_models or {}).items():
+        if checkpoint["models"].get(key):
+            module.load_state_dict(checkpoint["models"][key])
+    for key, opt in (extra_optimisers or {}).items():
+        if checkpoint["optimisers"].get(key):
+            opt.load_state_dict(checkpoint["optimisers"][key])
 
     step = int(checkpoint["step"])
 

@@ -102,6 +102,17 @@ def warn_stale_samples(samples_dir: Path) -> None:
               "judging it")
 
 
+def _has_discriminator(path) -> bool:
+    """Does this checkpoint carry a trained discriminator?"""
+    from pathlib import Path as _Path
+    if not _Path(path).exists():
+        return False
+    try:
+        return "discriminator" in load_checkpoint(path, map_location="cpu")["models"]
+    except Exception:
+        return False
+
+
 def run_caption(config, step: int) -> str:
     """A one-line record of what produced a sheet, stamped onto it.
 
@@ -172,18 +183,40 @@ def main():
 
     checkpoint_path = output_dir / "tryon.pt"
     start_step = 0
+    # Whether the adversary is being continued or created. A restored
+    # discriminator is already trained and can steer immediately; a new one
+    # cannot.
+    discriminator_restored = use_gan and _has_discriminator(checkpoint_path)
+
     if not config.train.get("resume", True):
         warn_stale_samples(output_dir / "samples")
     if config.train.get("resume", True):
-        start_step = maybe_resume(checkpoint_path, "composer", model=composer,
-                                  ema=ema, optimiser=optimiser, scheduler=scheduler,
-                                  config=config)
+        start_step = maybe_resume(
+            checkpoint_path, "composer", model=composer, ema=ema,
+            optimiser=optimiser, scheduler=scheduler, config=config,
+            extra_models={"discriminator": discriminator} if use_gan else None,
+            extra_optimisers={"discriminator": optimiser_d} if use_gan else None,
+        )
         if start_step:
             print(f"[tryon] resumed from step {start_step}")
         if start_step >= config.train.steps:
             print("[tryon] checkpoint is already at the requested step count; "
                   "raise train.steps to continue")
             return
+
+    gan_start = config.train.get("gan_start_step", 0)
+    gan_warmup = config.train.get("gan_warmup", 500)
+    # Steps during which the discriminator trains but its gradients do not reach
+    # the generator. A freshly initialised discriminator scores everything
+    # meaninglessly, and letting that steer an already-converged generator is
+    # what turns a sharpening pass into a regression.
+    gan_steer_from = gan_start if discriminator_restored \
+        else max(gan_start, start_step) + gan_warmup
+    if use_gan:
+        print(f"[tryon] discriminator "
+              f"{'restored' if discriminator_restored else 'initialised'}; "
+              f"trains from step {max(gan_start, start_step + 1)}, "
+              f"steers the generator from step {gan_steer_from}")
 
     finetune_after = config.train.get("finetune_warper_after", 0)
     optimiser_w = None
@@ -202,7 +235,8 @@ def main():
             )
             print(f"[tryon] unfroze warper at step {step}")
 
-        gan_active = use_gan and step >= config.train.get("gan_start_step", 0)
+        gan_active = use_gan and step >= gan_start
+        gan_steers = use_gan and step >= gan_steer_from
 
         optimiser.zero_grad(set_to_none=True)
         if optimiser_w:
@@ -223,7 +257,7 @@ def main():
                 result, warp, batch, perceptual, weights
             )
 
-            if gan_active:
+            if gan_steers:
                 fake_logits = discriminator(
                     diff_augment(result["output"], config.train.get(
                         "diffaug", "color,translation,cutout")),
@@ -265,9 +299,11 @@ def main():
         if step % config.train.save_every == 0 or step == config.train.steps:
             save_checkpoint(
                 checkpoint_path, step=step, config=config,
-                models={"composer": composer, "warper": warper},
+                models={"composer": composer, "warper": warper,
+                        **({"discriminator": discriminator} if use_gan else {})},
                 ema={"composer": ema.state_dict()},
-                optimisers={"composer": optimiser},
+                optimisers={"composer": optimiser,
+                            **({"discriminator": optimiser_d} if use_gan else {})},
             )
 
     print(f"[tryon] done in {(time.time() - start) / 60:.1f} min -> "

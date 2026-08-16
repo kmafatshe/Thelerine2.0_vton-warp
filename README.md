@@ -489,7 +489,8 @@ Stage 1 is comfortable either way; stage 2 is the expensive half. Options:
 | Face smeared | identity mask wrong | check CIHP labels 1/2/4/13 are present in `check_dataset.py` output |
 | `UnpicklingError: Weights only load failed` | checkpoint written by an older version of this code | it is loaded automatically via a fallback; re-saving uses the strict format |
 | `Refusing to resume ...: the data settings changed` | the checkpoint was fitted to differently-processed inputs | `train.resume=false` (or `FRESH_START = True`), or point `output_dir` somewhere new |
-| Quality collapsed after enabling GAN | discriminator won | raise `train.gan_start_step`, lower `train.lr_d`, keep DiffAugment on |
+| Output got *softer* after enabling the GAN | the adversarial term overwhelmed the alpha regulariser, so the mask went soft and more of the untrained `render` bled through | compare the `alpha` column against the non-GAN sheet; lower `loss.gan`, raise `loss.alpha`, or keep the non-GAN checkpoint |
+| Quality collapsed after enabling GAN | discriminator won | raise `train.gan_warmup`, lower `train.lr_d`, keep DiffAugment on |
 
 **Read the sample sheets left to right.** If the `warped` column is wrong,
 nothing in stage 2 can save it — go back to stage 1.

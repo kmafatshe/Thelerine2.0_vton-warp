@@ -126,6 +126,12 @@ train:
   # and each worker would rebuild the cache for itself.
   num_workers: 2
   gan_start_step: 6000
+  # Steps after the GAN activates during which the discriminator trains
+  # but does not steer the generator. A new discriminator scores
+  # everything meaninglessly; letting that reach a converged generator
+  # softens the composition mask and undoes the sharpening. Skipped
+  # when a trained discriminator is restored from the checkpoint.
+  gan_warmup: 500
   diffaug: color,translation,cutout
   finetune_warper_after: 0       # e.g. 10000 to jointly finetune near the end
   # Pick up automatically from <output_dir>/*.pt if it exists. Set false
