@@ -86,6 +86,20 @@ SEMANTIC_DATA_KEYS = (
     "preserve_legs",
 )
 
+# What a setting's behaviour was *before* it became configurable. A checkpoint
+# written then has no such key, and skipping it would be exactly backwards: its
+# absence tells us the run used the old behaviour, so if the current value
+# differs, the weights were fitted to different inputs.
+LEGACY_DEFAULTS = {
+    "preserve_legs": False,      # legs were always erased under a dress
+    "crop_to_person": False,     # photos were used whole
+    "crop_mode": "person",
+    "canonicalise_garment": False,
+    "parse_source": "auto",
+    "garment_type": "upper",
+    "label_scheme": "cihp",
+}
+
 
 def check_resume_compatible(checkpoint: dict, config) -> list[str]:
     """Report data settings that changed since the checkpoint was written.
@@ -98,11 +112,20 @@ def check_resume_compatible(checkpoint: dict, config) -> list[str]:
     """
     saved = checkpoint.get("config", {}).get("data", {})
     current = config.get("data", {})
-    return [
-        f"{key}: {saved.get(key)!r} -> {current.get(key)!r}"
-        for key in SEMANTIC_DATA_KEYS
-        if key in saved and saved.get(key) != current.get(key)
-    ]
+
+    changed = []
+    for key in SEMANTIC_DATA_KEYS:
+        if key in saved:
+            previous, implied = saved[key], False
+        elif key in LEGACY_DEFAULTS:
+            previous, implied = LEGACY_DEFAULTS[key], True
+        else:
+            continue  # genuinely unknown; better to say nothing than guess
+
+        if previous != current.get(key):
+            note = " (implied: the key did not exist yet)" if implied else ""
+            changed.append(f"{key}: {previous!r}{note} -> {current.get(key)!r}")
+    return changed
 
 
 def maybe_resume(path: str | Path, name: str, *, model, ema=None,
@@ -160,7 +183,14 @@ def maybe_resume(path: str | Path, name: str, *, model, ema=None,
     # you do when a Colab session dies and you extend the run. Replaying the
     # schedule against the *current* config is always consistent.
     if scheduler is not None:
-        for _ in range(step):
-            scheduler.step()
+        # PyTorch warns when the scheduler steps before the optimiser. That is
+        # precisely what replaying a schedule does, and it is correct here, so
+        # the warning is noise rather than a signal.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*")
+            for _ in range(step):
+                scheduler.step()
 
     return step

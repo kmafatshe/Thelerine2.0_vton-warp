@@ -34,7 +34,12 @@ import torch
 import torch.nn.functional as F
 
 from vtonwarp.data.agnostic import CONDITION_CHANNELS
-from vtonwarp.engine.checkpoint import load_checkpoint, maybe_resume, save_checkpoint
+from vtonwarp.engine.checkpoint import (
+    check_resume_compatible,
+    load_checkpoint,
+    maybe_resume,
+    save_checkpoint,
+)
 from vtonwarp.engine.data import build_dataloaders, infinite
 from vtonwarp.engine.ema import ModelEMA
 from vtonwarp.engine.schedule import build_onecycle
@@ -69,6 +74,18 @@ def load_warper(config, device):
             f"{trained_at[0]}x{trained_at[1]} but this config uses "
             f"{config.data.height}x{config.data.width}. Retrain stage 1 at the new "
             f"resolution, or match it here."
+        )
+
+    # The warper was trained on one interpretation of the data; conditioning it
+    # on another means feeding it inputs it has never seen. The resolution check
+    # above catches the crashing case, this catches the silent ones.
+    changed = check_resume_compatible(checkpoint, config)
+    if changed:
+        raise SystemExit(
+            f"{config.train.warp_checkpoint} was trained with different data "
+            "settings, so its warp will not match this stage's inputs.\n  "
+            + "\n  ".join(changed)
+            + "\n\nRetrain stage 1 with the current settings first."
         )
 
     warper = GarmentWarper(
